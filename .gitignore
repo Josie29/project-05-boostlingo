@@ -1,0 +1,30 @@
+.DS_Store
+.claude/settings.local.json
+
+# Environment
+.env
+.env.local
+*.local
+
+# Logs
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+
+# .NET
+bin/
+obj/
+
+# Audio capture artifacts
+*.wav
+*.mp3
+*.pcm
