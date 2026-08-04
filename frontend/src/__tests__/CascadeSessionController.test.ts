@@ -389,4 +389,58 @@ describe('CascadeSessionController', () => {
 
     expect(controller.getState().status).toBe('connected');
   });
+
+  // Catches the bug where transcript adapters never see any events because the
+  // controller parses control frames internally but forgets to fan them out to
+  // subscribers — the transcript panel's source column would stay empty forever.
+  it('forwards every parsed envelope, including transcript events, to event subscribers', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToEvents((event) => events.push(event));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    const transcriptEnvelope = {
+      v: 1,
+      type: 'transcript.partial',
+      payload: { utteranceId: 'utt_1', lane: 'source', text: 'Hel', timestampMs: 120 },
+    };
+    ws.onmessage?.({ data: JSON.stringify(transcriptEnvelope) });
+
+    expect(events).toContainEqual(transcriptEnvelope);
+    // The session.ready control frame from the handshake is fanned out too, since the
+    // controller forwards everything unfiltered and lets subscribers pick out what
+    // they care about (mirroring RealtimeSessionController.subscribeToEvents).
+    expect(events).toContainEqual({
+      v: 1,
+      type: 'session.ready',
+      payload: { sampleRateHz: 16000, encoding: 'pcm16', channels: 1 },
+    });
+  });
+
+  // Catches a crash bug: a malformed control frame (not valid JSON) must not throw
+  // out of the onmessage handler or notify subscribers with garbage.
+  it('does not notify event subscribers when a message is malformed', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToEvents((event) => events.push(event));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    ws.readyState = WebSocket.OPEN;
+    ws.onopen?.();
+
+    expect(() => ws.onmessage?.({ data: 'not json' })).not.toThrow();
+    expect(events).toEqual([]);
+
+    completeHandshake(ws);
+    await startPromise;
+  });
 });

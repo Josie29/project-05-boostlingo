@@ -35,6 +35,10 @@ export const CascadeMessageType = {
   SessionReady: 'session.ready',
   /** Server to client: a problem the client should surface to the user. */
   Error: 'error',
+  /** Server to client: an in-progress (not yet settled) transcript segment. */
+  TranscriptPartial: 'transcript.partial',
+  /** Server to client: the settled transcript text for one utterance. */
+  TranscriptFinal: 'transcript.final',
 } as const;
 
 /** Payload the server echoes on `session.ready`, matching `CascadeSessionReadyPayload`. */
@@ -47,4 +51,18 @@ export interface CascadeSessionReadyPayload {
 /** Payload the server sends on `error`, matching `CascadeErrorPayload`. */
 export interface CascadeErrorPayload {
   message: string;
+}
+
+/**
+ * Payload the server sends on `transcript.partial`/`transcript.final`, matching
+ * `CascadeTranscriptPayload` (`backend/CascadeAudioSession.cs`). `lane` is typed as
+ * `string` rather than `TranscriptLane` here since this is the raw wire shape — the
+ * adapter (`cascadeTranscriptAdapter.ts`) is what narrows/validates it before handing a
+ * {@link TranscriptUpdate} to the shared reducer.
+ */
+export interface CascadeTranscriptPayload {
+  utteranceId: string;
+  lane: string;
+  text: string;
+  timestampMs: number;
 }

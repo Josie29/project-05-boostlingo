@@ -48,6 +48,8 @@ function defaultDeps(): CascadeSessionControllerDeps {
 }
 
 type Listener = (state: CascadeSessionState) => void;
+/** Receives one JSON-parsed envelope off the cascade WebSocket, as-is, for adapters to interpret. */
+type EventListener = (event: unknown) => void;
 
 /**
  * Owns the transport for a single cascade-mode session: capturing the mic,
@@ -65,6 +67,7 @@ type Listener = (state: CascadeSessionState) => void;
 export class CascadeSessionController {
   private readonly deps: CascadeSessionControllerDeps;
   private readonly listeners = new Set<Listener>();
+  private readonly eventListeners = new Set<EventListener>();
 
   private state: CascadeSessionState = INITIAL_CASCADE_SESSION_STATE;
   private localStream: MediaStream | null = null;
@@ -96,6 +99,19 @@ export class CascadeSessionController {
     listener(this.state);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  /**
+   * Subscribes to JSON-parsed envelopes off the cascade WebSocket
+   * (transcript partials/finals, control frames, everything the server
+   * sends) — unfiltered. Callers (e.g. the transcript adapter) pick out
+   * what they care about. Returns an unsubscribe function.
+   */
+  subscribeToEvents(listener: EventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => {
+      this.eventListeners.delete(listener);
     };
   }
 
@@ -192,6 +208,11 @@ export class CascadeSessionController {
         } catch {
           return; // A malformed control frame shouldn't take down the session.
         }
+
+        // Fan out every envelope (transcript partials/finals included) to subscribers
+        // before this method's own handshake-specific handling below, so adapters see
+        // transcript events without this controller knowing their shape.
+        for (const listener of this.eventListeners) listener(envelope);
 
         if (envelope.type === CascadeMessageType.SessionReady) {
           if (settled) return; // A duplicate/late ready after the handshake already settled.

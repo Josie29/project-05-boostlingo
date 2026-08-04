@@ -1,5 +1,6 @@
 import { useCascadeSession } from '../cascade/useCascadeSession';
 import type { CascadeSessionStatus } from '../cascade/types';
+import { TranscriptPanel } from './TranscriptPanel';
 
 const STATUS_LABEL: Record<CascadeSessionStatus, string> = {
   idle: 'Idle',
@@ -12,16 +13,16 @@ const STATUS_LABEL: Record<CascadeSessionStatus, string> = {
 /**
  * Start/Stop control for a Cascade (STT -> MT -> TTS) interpreter session.
  * Hardcodes English -> Spanish for now — per-session language selection is
- * issue #8. Transcript/audio playback for this mode arrive with issues
- * #5-7; for now this only proves mic capture streams cleanly over the
- * `/ws/cascade` WebSocket end to end.
+ * issue #8. Renders the live STT transcript in the source column as soon as
+ * it arrives (issue #5); target-column machine translation/TTS playback
+ * arrive with issues #6-7.
  *
  * Contains no transport logic itself — all WebSocket/AudioWorklet state
  * lives in `useCascadeSession`, mirroring `RealtimeSessionPanel`'s shape so
  * the two modes are easy to compare side by side.
  */
 export function CascadeSessionPanel() {
-  const { status, errorMessage, start, stop } = useCascadeSession();
+  const { status, errorMessage, start, stop, transcriptEntries } = useCascadeSession();
 
   const isBusy = status === 'requesting-mic' || status === 'connecting';
   const isConnected = status === 'connected';
@@ -47,6 +48,8 @@ export function CascadeSessionPanel() {
           Stop
         </button>
       </div>
+
+      <TranscriptPanel entries={transcriptEntries} />
     </section>
   );
 }
