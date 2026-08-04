@@ -1,0 +1,6 @@
+@Boostlingo.Backend_HostAddress = http://localhost:5170
+
+GET {{Boostlingo.Backend_HostAddress}}/healthz
+Accept: application/json
+
+###
