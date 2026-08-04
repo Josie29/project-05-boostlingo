@@ -101,6 +101,7 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
         var chunker = new SentenceChunker();
         string? currentUtteranceId = null;
         var startSent = false;
+        var firstByteMarked = false;
 
         await foreach (var queued in _queue.Reader.ReadAllAsync(cancellationToken))
         {
@@ -115,13 +116,15 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
                 chunker = new SentenceChunker();
                 currentUtteranceId = chunk.TargetUtteranceId;
                 startSent = false;
+                firstByteMarked = false;
             }
 
             if (!chunk.IsFinal)
             {
                 foreach (var phrase in chunker.Append(chunk.Text))
                 {
-                    startSent = await SynthesizePhraseAsync(phrase, chunk, events, startSent, cancellationToken);
+                    (startSent, firstByteMarked) =
+                        await SynthesizePhraseAsync(phrase, chunk, events, startSent, firstByteMarked, cancellationToken);
                 }
 
                 continue;
@@ -135,13 +138,16 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
             var remainder = chunker.Flush();
             if (!string.IsNullOrEmpty(remainder))
             {
-                startSent = await SynthesizePhraseAsync(remainder, chunk, events, startSent, cancellationToken);
+                (startSent, firstByteMarked) =
+                    await SynthesizePhraseAsync(remainder, chunk, events, startSent, firstByteMarked, cancellationToken);
             }
 
             if (startSent)
             {
                 await events.SendEventAsync(
                     CascadeMessageTypes.TtsAudioEnd, new CascadeTtsAudioEndPayload(chunk.TargetUtteranceId), cancellationToken);
+                await CascadeLatencyMarks.EmitAsync(
+                    chunk.SourceUtteranceId, CascadeLatencyStages.TtsEnd, events, _logger, cancellationToken);
             }
 
             currentUtteranceId = null;
@@ -151,15 +157,28 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
     /// <summary>
     /// Synthesizes one phrase and forwards every audio chunk it produces as a binary
     /// frame, sending the utterance's opening <c>tts.audio.start</c> event first if
-    /// this is the first phrase synthesized for it. A synthesis failure is reported as
-    /// an <c>error</c> event and otherwise swallowed - scoped to this one phrase, never
-    /// taking down the pump or the rest of the utterance's remaining phrases.
+    /// this is the first phrase synthesized for it, and its
+    /// <see cref="CascadeLatencyStages.TtsFirstByte"/> latency mark (#10) - keyed by
+    /// <see cref="TranslationChunk.SourceUtteranceId"/>, matching every other stage's
+    /// mark for this utterance - the moment the first audio chunk arrives from the
+    /// provider, if this utterance hasn't already had one. A synthesis failure is
+    /// reported as an <c>error</c> event and otherwise swallowed - scoped to this one
+    /// phrase, never taking down the pump or the rest of the utterance's remaining
+    /// phrases.
     /// </summary>
-    /// <returns><c>true</c> once <c>tts.audio.start</c> has been sent for this
-    /// utterance (whether by this call or an earlier one) - the caller threads this
-    /// back in as <paramref name="startAlreadySent"/> for the next phrase.</returns>
-    private async Task<bool> SynthesizePhraseAsync(
-        string phraseText, TranslationChunk chunk, ICascadeEventSink events, bool startAlreadySent, CancellationToken cancellationToken)
+    /// <returns>
+    /// Whether <c>tts.audio.start</c> and the <c>ttsFirstByte</c> mark have now been
+    /// sent for this utterance (whether by this call or an earlier one) - the caller
+    /// threads both back in as <paramref name="startAlreadySent"/> and
+    /// <paramref name="firstByteAlreadyMarked"/> for the next phrase.
+    /// </returns>
+    private async Task<(bool StartSent, bool FirstByteMarked)> SynthesizePhraseAsync(
+        string phraseText,
+        TranslationChunk chunk,
+        ICascadeEventSink events,
+        bool startAlreadySent,
+        bool firstByteAlreadyMarked,
+        CancellationToken cancellationToken)
     {
         if (!startAlreadySent)
         {
@@ -176,6 +195,13 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
             var request = new TtsRequest(chunk.TargetUtteranceId, phraseText, chunk.TargetLang);
             await foreach (var audioChunk in _ttsProvider.SynthesizeAsync(request, cancellationToken))
             {
+                if (!firstByteAlreadyMarked)
+                {
+                    firstByteAlreadyMarked = true;
+                    await CascadeLatencyMarks.EmitAsync(
+                        chunk.SourceUtteranceId, CascadeLatencyStages.TtsFirstByte, events, _logger, cancellationToken);
+                }
+
                 await events.SendBinaryAsync(audioChunk.Pcm, cancellationToken);
             }
         }
@@ -188,7 +214,7 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
                 cancellationToken);
         }
 
-        return startAlreadySent;
+        return (startAlreadySent, firstByteAlreadyMarked);
     }
 
     private readonly record struct QueuedChunk(TranslationChunk Chunk, ICascadeEventSink Events);

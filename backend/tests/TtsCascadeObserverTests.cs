@@ -203,16 +203,32 @@ public class TtsCascadeObserverTests
     private static CancellationToken TestTimeout() => new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
 }
 
-/// <summary>Records every envelope and binary frame sent, so tests can assert on the exact protocol the frontend receives.</summary>
+/// <summary>
+/// Records every envelope and binary frame sent, so tests can assert on the exact
+/// protocol the frontend receives. <c>latency.mark</c> envelopes (#10) are routed to
+/// the separate <see cref="Marks"/> channel instead of <see cref="Sent"/>, so every test
+/// written before latency instrumentation existed keeps reading exactly the
+/// start/frames/end sequence it always did.
+/// </summary>
 file sealed class FakeEventSink : ICascadeEventSink
 {
     public Channel<(string Type, object? Payload)> Sent { get; } = Channel.CreateUnbounded<(string Type, object? Payload)>();
 
     public Channel<byte[]> Binary { get; } = Channel.CreateUnbounded<byte[]>();
 
+    public Channel<CascadeLatencyMarkPayload> Marks { get; } = Channel.CreateUnbounded<CascadeLatencyMarkPayload>();
+
     public Task SendEventAsync(string type, object? payload, CancellationToken cancellationToken)
     {
-        Sent.Writer.TryWrite((type, payload));
+        if (type == CascadeMessageTypes.LatencyMark && payload is CascadeLatencyMarkPayload mark)
+        {
+            Marks.Writer.TryWrite(mark);
+        }
+        else
+        {
+            Sent.Writer.TryWrite((type, payload));
+        }
+
         return Task.CompletedTask;
     }
 

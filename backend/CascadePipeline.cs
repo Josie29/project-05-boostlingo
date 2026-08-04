@@ -33,6 +33,14 @@ public sealed class CascadePipeline(
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
     private readonly Stopwatch _sessionStopwatch = new();
 
+    /// <summary>
+    /// Utterance ids that have already had their <see cref="CascadeLatencyStages.SttFirstPartial"/>
+    /// mark sent (#10, per-stage latency instrumentation) - only <see cref="PumpSegmentsAsync"/>
+    /// touches this, so no locking is needed despite the field being mutated across
+    /// awaits within that single background task.
+    /// </summary>
+    private readonly HashSet<string> _firstPartialMarked = [];
+
     private ISttStream? _sttStream;
     private Task? _segmentPumpTask;
     private Task? _translationPumpTask;
@@ -177,7 +185,12 @@ public sealed class CascadePipeline(
     /// session: every segment becomes a <c>transcript.*</c> event on the sink, then is
     /// handed to every <see cref="ISttSegmentObserver"/>. A provider/stream failure is
     /// reported as an <c>error</c> event rather than propagating and killing the
-    /// session - the client can keep the connection open even with STT down.
+    /// session - the client can keep the connection open even with STT down. Also emits
+    /// this utterance's <see cref="CascadeLatencyStages.SpeechEnd"/>,
+    /// <see cref="CascadeLatencyStages.SttFirstPartial"/>, and
+    /// <see cref="CascadeLatencyStages.SttFinal"/> latency marks (#10) - a leading
+    /// <see cref="SttSegment.SpeechEnd"/> marker segment produces only the speechEnd
+    /// mark (no transcript event, no observer notification, no translation queueing).
     /// </summary>
     private async Task PumpSegmentsAsync(ISttStream stream, ICascadeEventSink events, CancellationToken cancellationToken)
     {
@@ -185,11 +198,29 @@ public sealed class CascadePipeline(
         {
             await foreach (var segment in stream.ReadSegmentsAsync(cancellationToken))
             {
+                if (segment.IsSpeechEndMarker)
+                {
+                    await CascadeLatencyMarks.EmitAsync(
+                        segment.UtteranceId, CascadeLatencyStages.SpeechEnd, events, logger, cancellationToken);
+                    continue;
+                }
+
                 var envelopeType = segment.IsFinal ? CascadeMessageTypes.TranscriptFinal : CascadeMessageTypes.TranscriptPartial;
                 await events.SendEventAsync(
                     envelopeType,
                     new CascadeTranscriptPayload(segment.UtteranceId, CascadeTranscriptLanes.Source, segment.Text, segment.TimestampMs),
                     cancellationToken);
+
+                if (segment.IsFinal)
+                {
+                    await CascadeLatencyMarks.EmitAsync(
+                        segment.UtteranceId, CascadeLatencyStages.SttFinal, events, logger, cancellationToken);
+                }
+                else if (_firstPartialMarked.Add(segment.UtteranceId))
+                {
+                    await CascadeLatencyMarks.EmitAsync(
+                        segment.UtteranceId, CascadeLatencyStages.SttFirstPartial, events, logger, cancellationToken);
+                }
 
                 foreach (var observer in segmentObservers)
                 {
@@ -264,7 +295,11 @@ public sealed class CascadePipeline(
     /// <see cref="ITranslationObserver"/> (the seam TTS/#7 hooks into). A translation
     /// failure for this one utterance is reported as an <c>error</c> event and
     /// otherwise swallowed here so it can't take down the session or block translation
-    /// of the next queued utterance.
+    /// of the next queued utterance. Also emits this utterance's
+    /// <see cref="CascadeLatencyStages.MtFirstToken"/> and <see cref="CascadeLatencyStages.MtFinal"/>
+    /// latency marks (#10), keyed by the source <paramref name="segment"/>'s
+    /// <c>UtteranceId</c> - not the derived target-lane id - so every stage's mark for
+    /// this utterance shares one key.
     /// </summary>
     private async Task TranslateSegmentAsync(SttSegment segment, ICascadeEventSink events, CancellationToken cancellationToken)
     {
@@ -274,6 +309,7 @@ public sealed class CascadePipeline(
         // source entry instead of opening its own column entry.
         var targetUtteranceId = $"{segment.UtteranceId}-target";
         var translatedText = new StringBuilder();
+        var firstTokenMarked = false;
 
         try
         {
@@ -290,6 +326,14 @@ public sealed class CascadePipeline(
                     CascadeMessageTypes.TranscriptPartial,
                     new CascadeTranscriptPayload(targetUtteranceId, CascadeTranscriptLanes.Target, token, ElapsedSessionMs()),
                     cancellationToken);
+
+                if (!firstTokenMarked)
+                {
+                    firstTokenMarked = true;
+                    await CascadeLatencyMarks.EmitAsync(
+                        segment.UtteranceId, CascadeLatencyStages.MtFirstToken, events, logger, cancellationToken);
+                }
+
                 await NotifyTranslationObserversAsync(
                     new TranslationChunk(segment.UtteranceId, targetUtteranceId, token, IsFinal: false, _config.TargetLang),
                     events,
@@ -311,6 +355,7 @@ public sealed class CascadePipeline(
             CascadeMessageTypes.TranscriptFinal,
             new CascadeTranscriptPayload(targetUtteranceId, CascadeTranscriptLanes.Target, finalText, ElapsedSessionMs()),
             cancellationToken);
+        await CascadeLatencyMarks.EmitAsync(segment.UtteranceId, CascadeLatencyStages.MtFinal, events, logger, cancellationToken);
         await NotifyTranslationObserversAsync(
             new TranslationChunk(segment.UtteranceId, targetUtteranceId, finalText, IsFinal: true, _config.TargetLang),
             events,

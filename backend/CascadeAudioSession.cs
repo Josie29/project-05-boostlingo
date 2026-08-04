@@ -113,6 +113,13 @@ public static class CascadeMessageTypes
     /// named in the matching <see cref="TtsAudioStart"/>. See <see cref="CascadeTtsAudioEndPayload"/>.
     /// </summary>
     public const string TtsAudioEnd = "tts.audio.end";
+
+    /// <summary>
+    /// Server to client: one pipeline stage boundary was just reached for one
+    /// utterance (#10, per-stage latency instrumentation). See
+    /// <see cref="CascadeLatencyMarkPayload"/> and <see cref="CascadeLatencyStages"/>.
+    /// </summary>
+    public const string LatencyMark = "latency.mark";
 }
 
 /// <summary>
@@ -149,7 +156,117 @@ public sealed record CascadeInboundEnvelope(int V, string Type, JsonElement Payl
 /// <param name="V">Envelope schema version.</param>
 /// <param name="Type">One of <see cref="CascadeMessageTypes"/>.</param>
 /// <param name="Payload">Type-specific data, or <c>null</c> when the event carries none.</param>
-public sealed record CascadeOutboundEnvelope(int V, string Type, object? Payload);
+/// <param name="ServerTimeMs">The moment this envelope was sent, as milliseconds since
+/// the Unix epoch (UTC) - see <see cref="CascadeClock"/>. Present on every outbound
+/// envelope (#10, per-stage latency instrumentation) so the client can time any event,
+/// not only <see cref="CascadeMessageTypes.LatencyMark"/>, without ever needing to
+/// reconcile its own clock against the server's: every duration the client computes
+/// for a server-side span is a difference of two <c>serverTimeMs</c> values, never a
+/// client-minus-server subtraction.</param>
+public sealed record CascadeOutboundEnvelope(int V, string Type, object? Payload, long ServerTimeMs);
+
+/// <summary>
+/// Single source of truth for the server-relative clock discipline every cascade
+/// envelope uses (#10): the current time as milliseconds since the Unix epoch (UTC).
+/// Every outbound envelope (<see cref="CascadeOutboundEnvelope.ServerTimeMs"/>) and
+/// every <see cref="CascadeLatencyMarkPayload.ServerTimeMs"/> is stamped by calling this
+/// once, at the moment the corresponding event actually happened server-side - never by
+/// the client attempting to translate a server timestamp using its own clock offset.
+/// See the "Open sub-decisions" entry in <c>docs/tech-stack.md</c> for the full
+/// client-side-aggregation rationale this clock choice supports.
+/// </summary>
+public static class CascadeClock
+{
+    /// <summary>The current time, in milliseconds since the Unix epoch (UTC).</summary>
+    public static long UtcNowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+}
+
+/// <summary>
+/// String constants for the <c>stage</c> field of <see cref="CascadeLatencyMarkPayload"/>,
+/// one per cascade pipeline boundary #10 instruments. Every mark for one spoken
+/// utterance - across all seven stages - is keyed by the same <c>utteranceId</c>: the
+/// source-lane id <see cref="SttSegment.UtteranceId"/> assigns, not the derived
+/// <c>"-target"</c> id <see cref="CascadePipeline"/> uses for target-lane transcript
+/// bookkeeping, so a client can group a whole utterance's stage breakdown under one key.
+/// </summary>
+public static class CascadeLatencyStages
+{
+    /// <summary>
+    /// The STT (speech-to-text) provider's VAD (Voice Activity Detection) decided the
+    /// speaker's turn is complete and committed it as a conversation item - the
+    /// earliest cross-network signal of "speech end" the cascade has, ahead of any
+    /// transcript text. See <see cref="SttSegment.IsSpeechEndMarker"/>.
+    /// </summary>
+    public const string SpeechEnd = "speechEnd";
+
+    /// <summary>The first (possibly still-changing) STT transcript update for this utterance arrived.</summary>
+    public const string SttFirstPartial = "sttFirstPartial";
+
+    /// <summary>The settled STT transcript for this utterance arrived.</summary>
+    public const string SttFinal = "sttFinal";
+
+    /// <summary>The first MT (machine translation) token for this utterance's translation arrived.</summary>
+    public const string MtFirstToken = "mtFirstToken";
+
+    /// <summary>The settled MT translation for this utterance arrived.</summary>
+    public const string MtFinal = "mtFinal";
+
+    /// <summary>The first synthesized TTS (text-to-speech) audio byte for this utterance arrived from the provider.</summary>
+    public const string TtsFirstByte = "ttsFirstByte";
+
+    /// <summary>The last synthesized TTS audio for this utterance was sent - <see cref="CascadeMessageTypes.TtsAudioEnd"/> just went out.</summary>
+    public const string TtsEnd = "ttsEnd";
+}
+
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.LatencyMark"/> (#10, per-stage latency
+/// instrumentation): one pipeline stage boundary, for one utterance, at one server time.
+/// </summary>
+/// <param name="UtteranceId">The source-lane utterance id (see <see cref="CascadeLatencyStages"/>'s
+/// remarks) every stage of this one spoken utterance shares.</param>
+/// <param name="Stage">One of <see cref="CascadeLatencyStages"/>.</param>
+/// <param name="ServerTimeMs">The moment this stage boundary was reached, as
+/// milliseconds since the Unix epoch (UTC) - see <see cref="CascadeClock"/>. Computed by
+/// the pipeline stage that observed the boundary, not by the transport at send time, so
+/// it reflects when the work actually happened rather than when the envelope happened
+/// to be serialized.</param>
+public sealed record CascadeLatencyMarkPayload(string UtteranceId, string Stage, long ServerTimeMs);
+
+/// <summary>
+/// Sends one <see cref="CascadeMessageTypes.LatencyMark"/> event and swallows any send
+/// failure (logged at Debug, never thrown) so instrumentation can never take down the
+/// pipeline stage that's emitting it - mirrors how every other cross-cutting
+/// observer/stage failure in this codebase is isolated (e.g.
+/// <see cref="CascadePipeline"/>'s segment/translation observer error handling). Shared
+/// by every stage (<see cref="CascadePipeline"/> for STT/MT, <see cref="TtsCascadeObserver"/>
+/// for TTS) so the mark schema and failure handling can't drift between stages.
+/// </summary>
+public static class CascadeLatencyMarks
+{
+    /// <summary>
+    /// Sends a latency mark for one utterance/stage pair.
+    /// </summary>
+    /// <param name="utteranceId">The source-lane utterance id this mark belongs to.</param>
+    /// <param name="stage">One of <see cref="CascadeLatencyStages"/>.</param>
+    /// <param name="events">Sink to send the mark on - the same one the stage's own data event used.</param>
+    /// <param name="logger">Logs a send failure at Debug; never rethrown.</param>
+    /// <param name="cancellationToken">Propagates session cancellation.</param>
+    public static async Task EmitAsync(
+        string utteranceId, string stage, ICascadeEventSink events, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await events.SendEventAsync(
+                CascadeMessageTypes.LatencyMark,
+                new CascadeLatencyMarkPayload(utteranceId, stage, CascadeClock.UtcNowMs()),
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to send latency mark '{Stage}' for utterance {UtteranceId}.", stage, utteranceId);
+        }
+    }
+}
 
 /// <summary>Payload for <see cref="CascadeMessageTypes.SessionStart"/>.</summary>
 /// <param name="SourceLang">BCP-47-ish language tag the speaker is using, e.g. <c>"en"</c>.</param>
@@ -591,7 +708,7 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
     /// <inheritdoc />
     public async Task SendEventAsync(string type, object? payload, CancellationToken cancellationToken)
     {
-        var envelope = new CascadeOutboundEnvelope(CascadeAudioEndpoints.EnvelopeVersion, type, payload);
+        var envelope = new CascadeOutboundEnvelope(CascadeAudioEndpoints.EnvelopeVersion, type, payload, CascadeClock.UtcNowMs());
         var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, CascadeAudioEndpoints.JsonOptions);
 
         await _sendLock.WaitAsync(cancellationToken);

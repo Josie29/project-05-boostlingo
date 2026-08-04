@@ -132,6 +132,34 @@ public class CascadeAudioSessionTests
     }
 
     /// <summary>
+    /// Confirms every outbound envelope carries a plausible serverTimeMs (#10, per-stage
+    /// latency instrumentation clock discipline) - the field the client relies on to
+    /// compute every server-side stage duration without ever comparing its own clock to
+    /// the server's. Checked against session.ready here since it is the one envelope
+    /// every session unconditionally receives; the field itself is stamped once, at the
+    /// single transport choke point every event (including later cascade stages'
+    /// latency.mark events) passes through.
+    /// </summary>
+    [Fact]
+    public async Task EveryOutboundEnvelope_IncludesPlausibleServerTimeMs()
+    {
+        var fakePipeline = new FakeCascadePipeline();
+        using var factory = new CascadeTestFactory(fakePipeline);
+        using var socket = await ConnectAsync(factory.Server);
+
+        var before = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await SendTextAsync(socket, """{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"es"}}""");
+        var envelope = await ReceiveEnvelopeAsync(socket);
+        var after = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        Assert.Equal("session.ready", envelope.RootElement.GetProperty("type").GetString());
+        var serverTimeMs = envelope.RootElement.GetProperty("serverTimeMs").GetInt64();
+        Assert.InRange(serverTimeMs, before, after);
+
+        await CloseAsync(socket);
+    }
+
+    /// <summary>
     /// Confirms session.stop notifies the pipeline exactly once and the server closes
     /// its side of the socket, so no session or buffer is left dangling after a
     /// graceful client-initiated stop.

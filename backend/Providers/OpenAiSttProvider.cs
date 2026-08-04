@@ -134,9 +134,13 @@ public sealed class OpenAiSttProvider(
         public ValueTask DisposeAsync() => socket.DisposeAsync();
 
         /// <summary>
-        /// Interprets one inbound OpenAI realtime event. Only the transcription
-        /// delta/completed and error events are meaningful here; everything else
-        /// (session lifecycle, VAD speech_started/stopped, etc.) is logged and skipped.
+        /// Interprets one inbound OpenAI realtime event. The transcription
+        /// delta/completed and error events map to a transcript <see cref="SttSegment"/>;
+        /// <c>input_audio_buffer.committed</c> maps to a <see cref="SttSegment.SpeechEnd"/>
+        /// marker (#10, per-stage latency instrumentation - see that method's remarks
+        /// for why <c>committed</c>, not <c>speech_started</c>/<c>speech_stopped</c>, is
+        /// the one VAD (Voice Activity Detection) event worth surfacing here). Everything
+        /// else (session lifecycle, etc.) is skipped.
         /// </summary>
         /// <param name="json">One complete JSON text frame received from OpenAI.</param>
         /// <param name="timestampMs">Milliseconds since this stream was opened.</param>
@@ -164,6 +168,26 @@ public sealed class OpenAiSttProvider(
                         Text: GetString(root, "transcript") ?? string.Empty,
                         IsFinal: true,
                         TimestampMs: timestampMs);
+
+                case "input_audio_buffer.committed":
+                    // The VAD (Voice Activity Detection; semantic_vad - see
+                    // OpenAiSttProvider.VadType) decided this utterance's speech is
+                    // complete and committed it as a new conversation item: the
+                    // earliest cross-network "speech end" signal available, ahead of
+                    // any transcript text. item_id here is the same id the delta/completed
+                    // events for this same utterance will use, so CascadePipeline's
+                    // speechEnd latency mark keys by the same utteranceId every other
+                    // stage's mark for this utterance uses. Not yet spot-checked against
+                    // a live OPENAI_API_KEY - see this field's caveat in
+                    // docs/tech-stack.md alongside the semantic_vad decision itself.
+                    return SttSegment.SpeechEnd(GetString(root, "item_id") ?? "unknown", timestampMs);
+
+                case "input_audio_buffer.speech_started":
+                case "input_audio_buffer.speech_stopped":
+                    // VAD lifecycle events that don't carry an item_id yet (that's only
+                    // assigned at commit, handled above) - nothing to key a segment or
+                    // latency mark by from these alone.
+                    return null;
 
                 case "error":
                     var message = root.TryGetProperty("error", out var error)

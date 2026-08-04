@@ -354,6 +354,68 @@ public class CascadePipelineTests
         Assert.Equal(1, observer.DisposeCount);
     }
 
+    /// <summary>
+    /// Confirms one spoken utterance produces all seven latency marks (#10), in the
+    /// order the cascade actually reaches those boundaries - speechEnd, then the STT
+    /// pair, then the MT pair, then the TTS pair - each keyed by the same source
+    /// utteranceId, and that their serverTimeMs values never decrease across the run.
+    /// This is the exact sequence the frontend's latency panel groups by utteranceId
+    /// and renders as a per-stage breakdown; losing the order or the shared key would
+    /// silently corrupt that breakdown without any single stage's own test catching it.
+    /// </summary>
+    [Fact]
+    public async Task FullUtterance_EmitsLatencyMarks_InStageOrder_WithSharedUtteranceId_AndMonotonicTimestamps()
+    {
+        var stream = new FakeSttStream();
+        var ttsProvider = new FakeTtsProvider(request => Chunks(request.UtteranceId, [1, 2]));
+        var ttsObserver = new TtsCascadeObserver(ttsProvider, NullLogger<TtsCascadeObserver>.Instance);
+        var translationProvider = new FakeTranslationProvider(_ => Tokens("Hola"));
+        var pipeline = CreatePipeline(new FakeSttProvider(stream), translationProvider, [ttsObserver]);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        stream.Emit(SttSegment.SpeechEnd("utt-1", 5));
+        stream.Emit(new SttSegment("utt-1", "Hello", IsFinal: false, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "Hello world", IsFinal: true, TimestampMs: 50));
+
+        string[] expectedStages =
+        [
+            CascadeLatencyStages.SpeechEnd,
+            CascadeLatencyStages.SttFirstPartial,
+            CascadeLatencyStages.SttFinal,
+            CascadeLatencyStages.MtFirstToken,
+            CascadeLatencyStages.MtFinal,
+            CascadeLatencyStages.TtsFirstByte,
+            CascadeLatencyStages.TtsEnd,
+        ];
+
+        var marks = new List<CascadeLatencyMarkPayload>();
+        foreach (var _ in expectedStages)
+        {
+            marks.Add(await sink.Marks.Reader.ReadAsync(TestTimeout()));
+        }
+
+        Assert.Equal(expectedStages, marks.Select(m => m.Stage));
+        Assert.All(marks, mark => Assert.Equal("utt-1", mark.UtteranceId));
+        for (var i = 1; i < marks.Count; i++)
+        {
+            Assert.True(
+                marks[i].ServerTimeMs >= marks[i - 1].ServerTimeMs,
+                $"Mark '{marks[i].Stage}' ({marks[i].ServerTimeMs}) preceded '{marks[i - 1].Stage}' ({marks[i - 1].ServerTimeMs}).");
+        }
+
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
+    }
+
+    private static async IAsyncEnumerable<TtsAudioChunk> Chunks(string utteranceId, params byte[] frames)
+    {
+        foreach (var frame in frames)
+        {
+            await Task.Yield();
+            yield return new TtsAudioChunk(utteranceId, new[] { frame });
+        }
+    }
+
     private static async IAsyncEnumerable<string> Tokens(params string[] tokens)
     {
         foreach (var token in tokens)
@@ -396,15 +458,33 @@ public class CascadePipelineTests
     private static CancellationToken TestTimeout() => new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
 }
 
-/// <summary>Records every envelope sent, so tests can assert on the exact shape the frontend receives.</summary>
+/// <summary>
+/// Records every envelope sent, so tests can assert on the exact shape the frontend
+/// receives. <c>latency.mark</c> envelopes (#10) are routed to the separate
+/// <see cref="Marks"/> channel instead of <see cref="Sent"/> - mirroring how
+/// <see cref="LaneSplitEventReader"/> demultiplexes transcript lanes - so every test
+/// written before latency instrumentation existed keeps reading exactly the sequence of
+/// envelopes it always did, without needing to filter marks out itself.
+/// </summary>
 file sealed class FakeEventSink : ICascadeEventSink
 {
     public System.Threading.Channels.Channel<(string Type, object? Payload)> Sent { get; } =
         System.Threading.Channels.Channel.CreateUnbounded<(string Type, object? Payload)>();
 
+    public System.Threading.Channels.Channel<CascadeLatencyMarkPayload> Marks { get; } =
+        System.Threading.Channels.Channel.CreateUnbounded<CascadeLatencyMarkPayload>();
+
     public Task SendEventAsync(string type, object? payload, CancellationToken cancellationToken)
     {
-        Sent.Writer.TryWrite((type, payload));
+        if (type == CascadeMessageTypes.LatencyMark && payload is CascadeLatencyMarkPayload mark)
+        {
+            Marks.Writer.TryWrite(mark);
+        }
+        else
+        {
+            Sent.Writer.TryWrite((type, payload));
+        }
+
         return Task.CompletedTask;
     }
 
@@ -519,6 +599,19 @@ file sealed class FakeTranslationProvider(Func<TranslationRequest, IAsyncEnumera
         Requests.Add(request);
         return respond(request);
     }
+}
+
+/// <summary>
+/// A controllable <see cref="ITtsProvider"/> - the same "fake the far side" shape as
+/// <see cref="FakeTranslationProvider"/>, needed here (rather than reusing
+/// <c>TtsCascadeObserverTests</c>' own copy, which is file-scoped to that file) so a
+/// full end-to-end latency-mark test can wire a real <see cref="TtsCascadeObserver"/>
+/// into <see cref="CascadePipeline"/> without a real TTS backend.
+/// </summary>
+file sealed class FakeTtsProvider(Func<TtsRequest, IAsyncEnumerable<TtsAudioChunk>> respond) : ITtsProvider
+{
+    public IAsyncEnumerable<TtsAudioChunk> SynthesizeAsync(TtsRequest request, CancellationToken cancellationToken) =>
+        respond(request);
 }
 
 /// <summary>Records every chunk it's notified of, so tests can confirm the TTS/#7 observer seam actually fires.</summary>

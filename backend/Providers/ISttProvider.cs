@@ -12,7 +12,29 @@
 /// (e.g. VAD detected the speaker stopped); <c>false</c> for an in-progress partial.</param>
 /// <param name="TimestampMs">Milliseconds since the stream started, for latency
 /// instrumentation and ordering.</param>
-public sealed record SttSegment(string UtteranceId, string Text, bool IsFinal, long TimestampMs);
+/// <param name="IsSpeechEndMarker"><c>true</c> for a speech-end boundary marker (see
+/// <see cref="SpeechEnd"/>) rather than an actual transcript update - the provider's
+/// VAD (Voice Activity Detection) decided the speaker's turn is over and committed it,
+/// ahead of any transcript text. <c>Text</c> is always empty and <c>IsFinal</c> is
+/// always <c>false</c> on a marker; consumers should check this flag first and skip
+/// transcript handling entirely when it is set. Defaults to <c>false</c> so every
+/// existing call site constructing a real transcript segment is unaffected.</param>
+public sealed record SttSegment(string UtteranceId, string Text, bool IsFinal, long TimestampMs, bool IsSpeechEndMarker = false)
+{
+    /// <summary>
+    /// Creates a speech-end boundary marker (#10, per-stage latency instrumentation):
+    /// no transcript text, just the moment the provider's VAD (Voice Activity
+    /// Detection) considered this utterance's speech complete. <paramref name="utteranceId"/>
+    /// must be the same id this same utterance's later partial/final transcript
+    /// segments use, so a consumer's speechEnd latency mark and its sttFirstPartial/sttFinal
+    /// marks all key by one shared utterance id.
+    /// </summary>
+    /// <param name="utteranceId">The id this utterance's later transcript segments will share.</param>
+    /// <param name="timestampMs">Milliseconds since the stream started.</param>
+    /// <returns>A marker segment with empty text and <c>IsFinal: false</c>.</returns>
+    public static SttSegment SpeechEnd(string utteranceId, long timestampMs) =>
+        new(utteranceId, Text: string.Empty, IsFinal: false, timestampMs, IsSpeechEndMarker: true);
+}
 
 /// <summary>Per-session configuration an <see cref="ISttProvider"/> needs to start a stream.</summary>
 /// <param name="SourceLang">Language tag the speaker is using, e.g. <c>"en"</c>. Providers that
@@ -38,9 +60,11 @@ public interface ISttStream : IAsyncDisposable
 
     /// <summary>
     /// Reads every segment the provider produces, partials and finals alike, for as
-    /// long as the stream stays open. Completes (without throwing) when the provider
-    /// closes the stream normally, and stops early if <paramref name="cancellationToken"/>
-    /// is cancelled.
+    /// long as the stream stays open - plus, if the provider signals it, a leading
+    /// <see cref="SttSegment.SpeechEnd"/> marker for an utterance before its transcript
+    /// segments arrive (#10, per-stage latency instrumentation). Completes (without
+    /// throwing) when the provider closes the stream normally, and stops early if
+    /// <paramref name="cancellationToken"/> is cancelled.
     /// </summary>
     /// <param name="cancellationToken">Stops enumeration when cancelled.</param>
     /// <returns>An async sequence of segments in the order the provider emitted them.</returns>
