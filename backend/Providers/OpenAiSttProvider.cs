@@ -15,7 +15,8 @@ using System.Text.Json.Serialization;
 public sealed class OpenAiSttProvider(
     IConfiguration configuration,
     IRealtimeSocketFactory socketFactory,
-    ILogger<OpenAiSttProvider> logger) : ISttProvider
+    ILogger<OpenAiSttProvider> logger,
+    TimeSpan? connectTimeout = null) : ISttProvider
 {
     /// <summary>OpenAI transcription model used for cascade-mode STT.</summary>
     public const string Model = "gpt-4o-transcribe";
@@ -26,6 +27,15 @@ public sealed class OpenAiSttProvider(
     /// the semantic_vad-vs-server_vad rationale.
     /// </summary>
     public const string VadType = "semantic_vad";
+
+    /// <summary>
+    /// Default connect/handshake timeout (#12, error handling hardening) if
+    /// <paramref name="connectTimeout"/> isn't supplied - DI (dependency injection)
+    /// resolves this constructor without one in production, so this is what actually
+    /// governs a real deployment; tests inject a much shorter value to exercise the
+    /// timeout path without waiting for it.
+    /// </summary>
+    private static readonly TimeSpan DefaultConnectTimeout = TimeSpan.FromSeconds(10);
 
     private static readonly Uri Endpoint = new("wss://api.openai.com/v1/realtime?intent=transcription");
 
@@ -40,7 +50,9 @@ public sealed class OpenAiSttProvider(
 
     /// <inheritdoc />
     /// <exception cref="SttProviderUnavailableException">Thrown when <c>OPENAI_API_KEY</c>
-    /// is not configured, or the initial connection/handshake with OpenAI fails.</exception>
+    /// is not configured, the initial connection/handshake with OpenAI fails, or that
+    /// handshake does not complete within the connect timeout (#12, error handling
+    /// hardening).</exception>
     public async Task<ISttStream> StartStreamAsync(SttStreamConfig config, CancellationToken cancellationToken)
     {
         var apiKey = configuration["OPENAI_API_KEY"];
@@ -51,15 +63,30 @@ public sealed class OpenAiSttProvider(
         }
 
         var socket = socketFactory.Create();
+        // Linked, not the bare cancellationToken: a hung TCP/TLS handshake or upgrade
+        // response must not be able to leave a cascade session stuck waiting forever
+        // for STT to start (#12) - CancelAfter fires the connect timeout independently
+        // of whatever the caller's own token does.
+        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        connectCts.CancelAfter(connectTimeout ?? DefaultConnectTimeout);
+
         try
         {
             var headers = new Dictionary<string, string>
             {
                 ["Authorization"] = $"Bearer {apiKey}",
             };
-            await socket.ConnectAsync(Endpoint, headers, cancellationToken);
+            await socket.ConnectAsync(Endpoint, headers, connectCts.Token);
             await socket.SendTextAsync(
-                JsonSerializer.Serialize(BuildSessionUpdate(config), OpenAiJsonOptions), cancellationToken);
+                JsonSerializer.Serialize(BuildSessionUpdate(config), OpenAiJsonOptions), connectCts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            await socket.DisposeAsync();
+            logger.LogError(
+                "Timed out connecting to the OpenAI realtime transcription stream after {Timeout}.",
+                connectTimeout ?? DefaultConnectTimeout);
+            throw new SttProviderUnavailableException("Timed out connecting to the speech-to-text provider.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

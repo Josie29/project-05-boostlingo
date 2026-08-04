@@ -134,6 +134,13 @@ public class TtsCascadeObserverTests
         Assert.Equal(CascadeMessageTypes.TtsAudioStart, startA.Type);
         Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
 
+        // #12: scoped to this one utterance (tts stage, its source-lane id) and
+        // recoverable, since a later utterance below still synthesizes successfully.
+        var errorPayload = Assert.IsType<CascadeErrorPayload>(errorEnvelope.Payload);
+        Assert.Equal(CascadeErrorStages.Tts, errorPayload.Stage);
+        Assert.Equal("utt-a", errorPayload.UtteranceId);
+        Assert.True(errorPayload.Recoverable);
+
         // The failed phrase produced no audio, but tts.audio.start was already sent
         // for utt-a before the failure, so its IsFinal chunk still closes with
         // tts.audio.end (see TtsCascadeObserver.PumpAsync) - drain it before moving on
@@ -182,6 +189,31 @@ public class TtsCascadeObserverTests
         Assert.Equal(CascadeMessageTypes.TtsAudioEnd, end.Type);
     }
 
+    /// <summary>
+    /// Confirms an utterance whose translation settled to nothing but whitespace never
+    /// reaches the TTS (text-to-speech) provider at all (#12) - no tts.audio.start, no
+    /// binary frames, no tts.audio.end, and no error. Synthesizing silence would just be
+    /// a wasted round trip and a start/end pair bracketing no audio.
+    /// </summary>
+    [Fact]
+    public async Task EmptyFinalTranslation_SkipsSynthesis_NoAudioEvents()
+    {
+        var ttsProvider = new FakeTtsProvider(_ => Chunks("utt-1-target", [1]));
+        var observer = new TtsCascadeObserver(ttsProvider, NullLogger<TtsCascadeObserver>.Instance);
+        var sink = new FakeEventSink();
+
+        await observer.OnTranslationChunkAsync(
+            new TranslationChunk("utt-1", "utt-1-target", "   ", IsFinal: false, "es"), sink, CancellationToken.None);
+        await observer.OnTranslationChunkAsync(
+            new TranslationChunk("utt-1", "utt-1-target", "   ", IsFinal: true, "es"), sink, CancellationToken.None);
+
+        await observer.DisposeAsync().AsTask().WaitAsync(TestTimeout());
+
+        Assert.Empty(ttsProvider.Requests);
+        Assert.False(sink.Sent.Reader.TryRead(out _));
+        Assert.False(sink.Binary.Reader.TryRead(out _));
+    }
+
     private static async IAsyncEnumerable<TtsAudioChunk> Chunks(string utteranceId, params byte[][] frames)
     {
         foreach (var frame in frames)
@@ -212,6 +244,8 @@ public class TtsCascadeObserverTests
 /// </summary>
 file sealed class FakeEventSink : ICascadeEventSink
 {
+    public Guid SessionId { get; } = Guid.NewGuid();
+
     public Channel<(string Type, object? Payload)> Sent { get; } = Channel.CreateUnbounded<(string Type, object? Payload)>();
 
     public Channel<byte[]> Binary { get; } = Channel.CreateUnbounded<byte[]>();

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
@@ -23,7 +24,8 @@ using System.Text.Json.Serialization;
 /// faking a higher-level client interface, mirroring <see cref="OpenAiTranslationProvider"/>'s
 /// own test seam.
 /// </remarks>
-public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration configuration) : ITtsProvider
+public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration configuration, ILogger<OpenAiTtsProvider> logger)
+    : ITtsProvider
 {
     /// <summary>OpenAI TTS model used for cascade-mode speech synthesis. Chosen for its
     /// low-latency streaming support, which is what lets synthesis start on a phrase
@@ -41,10 +43,17 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
     /// approximate size of each <see cref="TtsAudioChunk"/> this provider yields.</summary>
     private const int ReadBufferBytes = 4096;
 
+    /// <summary>
+    /// One-retry-only backoff (#12, error handling hardening), mirroring
+    /// <see cref="OpenAiTranslationProvider"/>'s own retry delay.
+    /// </summary>
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(500);
+
     /// <inheritdoc />
     /// <exception cref="TtsProviderException">Thrown when <c>OPENAI_API_KEY</c> is not
-    /// configured, the request fails outright (network error or non-success status),
-    /// or the response stream drops before it signals completion.</exception>
+    /// configured, the request fails outright (network error or non-success status)
+    /// even after one retry, or the response stream drops before it signals
+    /// completion.</exception>
     public async IAsyncEnumerable<TtsAudioChunk> SynthesizeAsync(
         TtsRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -62,26 +71,10 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
             throw new TtsProviderException("The server is not configured with an OpenAI API key.");
         }
 
-        using var httpRequest = BuildRequest(request, apiKey);
-
-        HttpResponseMessage response;
-        try
-        {
-            response = await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        }
-        catch (HttpRequestException ex)
-        {
-            throw new TtsProviderException("Failed to connect to the text-to-speech provider.", ex);
-        }
+        var response = await SendWithOneRetryAsync(request, apiKey, cancellationToken);
 
         using (response)
         {
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new TtsProviderException(
-                    $"Text-to-speech request failed with status {(int)response.StatusCode}.");
-            }
-
             var body = await response.Content.ReadAsStreamAsync(cancellationToken);
             var buffer = new byte[ReadBufferBytes];
 
@@ -109,6 +102,91 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
                 yield return new TtsAudioChunk(request.UtteranceId, buffer[..bytesRead]);
             }
         }
+    }
+
+    /// <summary>
+    /// Sends the speech synthesis request, retrying exactly once (#12, error handling
+    /// hardening) if the first attempt fails transiently: a connection failure, a
+    /// request timeout, a 429 (rate limited), or any 5xx. A 4xx other than 429 (auth or
+    /// validation - retrying would fail identically) throws immediately with no retry.
+    /// The retry always builds a brand-new <see cref="HttpRequestMessage"/> - an
+    /// <see cref="HttpRequestMessage"/> can only ever be sent once - so nothing from
+    /// this method's caller has read any audio from the response body yet by the time a
+    /// retry happens, meaning a retry here can never duplicate already-streamed audio.
+    /// </summary>
+    /// <param name="request">The phrase text, its utterance id, and target language.</param>
+    /// <param name="apiKey">The bearer token to authenticate with.</param>
+    /// <param name="cancellationToken">Propagates cancellation of either attempt.</param>
+    /// <returns>The successful response, with headers already read (but the body not
+    /// yet consumed) - the caller owns disposing it.</returns>
+    /// <exception cref="TtsProviderException">Thrown when both the initial attempt and
+    /// the retry fail, or the first attempt fails non-transiently.</exception>
+    private async Task<HttpResponseMessage> SendWithOneRetryAsync(TtsRequest request, string apiKey, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 2;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            using var httpRequest = BuildRequest(request, apiKey);
+            HttpResponseMessage response;
+
+            try
+            {
+                response = await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            }
+            catch (HttpRequestException ex) when (attempt < maxAttempts)
+            {
+                logger.LogWarning(
+                    ex, "Text-to-speech request failed to connect (attempt {Attempt}); retrying once.", attempt);
+                await Task.Delay(RetryDelay, cancellationToken);
+                continue;
+            }
+            catch (HttpRequestException ex)
+            {
+                throw new TtsProviderException("Failed to connect to the text-to-speech provider.", ex);
+            }
+            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
+            {
+                logger.LogWarning(ex, "Text-to-speech request timed out (attempt {Attempt}); retrying once.", attempt);
+                await Task.Delay(RetryDelay, cancellationToken);
+                continue;
+            }
+            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TtsProviderException("Text-to-speech request timed out.", ex);
+            }
+
+            if (response.IsSuccessStatusCode)
+            {
+                return response;
+            }
+
+            var isTransient = response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500;
+            if (isTransient && attempt < maxAttempts)
+            {
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    logger.LogWarning("Text-to-speech request was rate-limited (429); retrying once.");
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Text-to-speech request failed transiently ({StatusCode}); retrying once.", (int)response.StatusCode);
+                }
+
+                response.Dispose();
+                await Task.Delay(RetryDelay, cancellationToken);
+                continue;
+            }
+
+            var statusCode = (int)response.StatusCode;
+            response.Dispose();
+            throw new TtsProviderException($"Text-to-speech request failed with status {statusCode}.");
+        }
+
+        // Unreachable: every loop iteration either returns, throws, or retries, and
+        // maxAttempts bounds the number of retries - kept only so the compiler sees
+        // every path as returning or throwing.
+        throw new TtsProviderException("Text-to-speech request failed after retrying.");
     }
 
     private static HttpRequestMessage BuildRequest(TtsRequest request, string apiKey)

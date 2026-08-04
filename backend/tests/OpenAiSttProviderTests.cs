@@ -24,6 +24,24 @@ public class OpenAiSttProviderTests
     }
 
     /// <summary>
+    /// Confirms a connect/handshake that never completes surfaces as
+    /// SttProviderUnavailableException once the connect timeout (#12, error handling
+    /// hardening) elapses, rather than leaving the cascade session hanging forever
+    /// waiting for STT to start.
+    /// </summary>
+    [Fact]
+    public async Task StartStreamAsync_ConnectHandshakeTimesOut_ThrowsSttProviderUnavailable()
+    {
+        var socketFactory = new FakeRealtimeSocketFactory { ConnectDelay = TimeSpan.FromSeconds(5) };
+        var provider = CreateProvider(socketFactory, apiKey: "sk-test", connectTimeout: TimeSpan.FromMilliseconds(50));
+
+        var ex = await Assert.ThrowsAsync<SttProviderUnavailableException>(
+            () => provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None));
+
+        Assert.Contains("Timed out", ex.Message);
+    }
+
+    /// <summary>
     /// Confirms starting a stream connects to OpenAI's transcription-intent endpoint
     /// with the bearer key and sends a session config naming gpt-4o-transcribe and the
     /// chosen VAD mode - the whole point of hiding a real key/model behind DI is that
@@ -212,12 +230,13 @@ public class OpenAiSttProviderTests
         Assert.False(marker.IsFinal);
     }
 
-    private static OpenAiSttProvider CreateProvider(IRealtimeSocketFactory socketFactory, string? apiKey)
+    private static OpenAiSttProvider CreateProvider(
+        IRealtimeSocketFactory socketFactory, string? apiKey, TimeSpan? connectTimeout = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = apiKey })
             .Build();
-        return new OpenAiSttProvider(configuration, socketFactory, NullLogger<OpenAiSttProvider>.Instance);
+        return new OpenAiSttProvider(configuration, socketFactory, NullLogger<OpenAiSttProvider>.Instance, connectTimeout);
     }
 }
 
@@ -226,9 +245,14 @@ file sealed class FakeRealtimeSocketFactory : IRealtimeSocketFactory
 {
     public List<FakeRealtimeSocket> CreatedSockets { get; } = [];
 
+    /// <summary>Applied to every socket this factory creates from now on (#12, error
+    /// handling hardening's connect-timeout test) - lets a test simulate a handshake
+    /// that never completes within <see cref="OpenAiSttProvider"/>'s connect timeout.</summary>
+    public TimeSpan ConnectDelay { get; set; } = TimeSpan.Zero;
+
     public IRealtimeSocket Create()
     {
-        var socket = new FakeRealtimeSocket();
+        var socket = new FakeRealtimeSocket { ConnectDelay = ConnectDelay };
         CreatedSockets.Add(socket);
         return socket;
     }
@@ -247,12 +271,20 @@ file sealed class FakeRealtimeSocket : IRealtimeSocket
 
     public List<string> SentText { get; } = [];
 
+    /// <summary>How long <see cref="ConnectAsync"/> waits before completing - zero
+    /// (the default) completes immediately; set by <see cref="FakeRealtimeSocketFactory.ConnectDelay"/>
+    /// to simulate a handshake that never finishes within the provider's own timeout.</summary>
+    public TimeSpan ConnectDelay { get; set; } = TimeSpan.Zero;
+
     public void EnqueueIncoming(string? json) => _incoming.Enqueue(json);
 
-    public Task ConnectAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    public async Task ConnectAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
         ConnectHeaders = headers;
-        return Task.CompletedTask;
+        if (ConnectDelay > TimeSpan.Zero)
+        {
+            await Task.Delay(ConnectDelay, cancellationToken);
+        }
     }
 
     public Task SendTextAsync(string json, CancellationToken cancellationToken)

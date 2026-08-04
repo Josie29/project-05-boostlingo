@@ -300,9 +300,52 @@ public sealed record CascadeSessionStartPayload(string SourceLang, string Target
 /// <param name="Channels">Required upstream channel count; see <see cref="CascadeAudioFormat"/>.</param>
 public sealed record CascadeSessionReadyPayload(int SampleRateHz, string Encoding, int Channels);
 
-/// <summary>Payload for <see cref="CascadeMessageTypes.Error"/>.</summary>
+/// <summary>
+/// String constants for the <c>stage</c> field of <see cref="CascadeErrorPayload"/> (#12,
+/// error handling hardening): which cascade stage - or the session/transport itself -
+/// produced a given <see cref="CascadeMessageTypes.Error"/> envelope, so the client can
+/// render per-stage errors distinctly instead of one undifferentiated error banner.
+/// </summary>
+public static class CascadeErrorStages
+{
+    /// <summary>Speech-to-text (#5): the provider failed to start, or an open stream died.</summary>
+    public const string Stt = "stt";
+
+    /// <summary>Machine translation (#6): a single utterance's translation request failed.</summary>
+    public const string Mt = "mt";
+
+    /// <summary>Text-to-speech (#7): a single phrase's synthesis request failed.</summary>
+    public const string Tts = "tts";
+
+    /// <summary>
+    /// Not scoped to any one pipeline stage - a transport/control-message problem (see
+    /// <see cref="CascadeSession"/>), or a stage that has become unusable for the rest
+    /// of the session (e.g. STT's one reopen attempt also failed).
+    /// </summary>
+    public const string Session = "session";
+}
+
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.Error"/>. Extended for #12 (error handling
+/// hardening) with <see cref="Stage"/>/<see cref="UtteranceId"/>/<see cref="Recoverable"/>
+/// alongside the original <see cref="Message"/> field, so a client that only ever read
+/// <c>message</c> keeps working unchanged while a client that wants to render per-stage
+/// errors distinctly (e.g. a small badge on just the target-lane transcript column for an
+/// <see cref="CascadeErrorStages.Mt"/> failure) has what it needs to do so.
+/// </summary>
 /// <param name="Message">A human-readable, non-sensitive description of what went wrong.</param>
-public sealed record CascadeErrorPayload(string Message);
+/// <param name="Stage">One of <see cref="CascadeErrorStages"/>.</param>
+/// <param name="UtteranceId">The source-lane utterance id (see <see cref="CascadeLatencyStages"/>'s
+/// remarks on why every stage's per-utterance event keys by that same id, not a
+/// stage-derived one like TTS's own target-lane id) this error is scoped to, or
+/// <c>null</c> for a <see cref="CascadeErrorStages.Session"/> error that isn't tied to
+/// any one utterance.</param>
+/// <param name="Recoverable"><c>true</c> if the session can keep running as before after
+/// this error (a single failed utterance, or a transient failure that a retry already
+/// resolved elsewhere); <c>false</c> if <see cref="Stage"/> is now unusable for the rest
+/// of the session (e.g. STT's stream died and its one reopen attempt also failed) and the
+/// client should show persistent guidance rather than treating this as a one-off.</param>
+public sealed record CascadeErrorPayload(string Message, string Stage, string? UtteranceId = null, bool Recoverable = true);
 
 /// <summary>
 /// Payload for <see cref="CascadeMessageTypes.TranscriptPartial"/> and
@@ -375,6 +418,16 @@ public sealed record CascadeSessionConfig(string SourceLang, string TargetLang);
 /// </summary>
 public interface ICascadeEventSink
 {
+    /// <summary>
+    /// The session this sink belongs to (#12, error handling hardening) - threaded
+    /// through to every pipeline stage that already receives an <see cref="ICascadeEventSink"/>
+    /// on every call, so <see cref="CascadePipeline"/> and <see cref="TtsCascadeObserver"/>
+    /// can stamp every failure log line with the session id without either needing a
+    /// constructor dependency of its own or <see cref="CascadeSession"/> needing to pass
+    /// it as a separate parameter on every interface method.
+    /// </summary>
+    Guid SessionId { get; }
+
     /// <summary>
     /// Sends a <c>{v, type, payload}</c> envelope to the client as a text frame.
     /// </summary>
@@ -484,6 +537,9 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
     private DateTime _lastLogUtc = DateTime.UtcNow;
     private bool _sessionEndedNotified;
 
+    /// <inheritdoc />
+    public Guid SessionId => _sessionId;
+
     /// <summary>
     /// Runs the session to completion: consumes control and audio frames until the
     /// client disconnects, sends <see cref="CascadeMessageTypes.SessionStop"/>, or an
@@ -502,7 +558,7 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Cascade session {SessionId} terminated by an unexpected error.", _sessionId);
-            await TrySendErrorAsync("Internal server error.", cancellationToken);
+            await TrySendErrorAsync("Internal server error.", CascadeErrorStages.Session, recoverable: false, cancellationToken);
         }
         finally
         {
@@ -558,7 +614,8 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
                         "Cascade session {SessionId} sent a frame exceeding {MaxBytes} bytes; aborting.",
                         _sessionId,
                         MaxFrameBytes);
-                    await TrySendErrorAsync($"Frame exceeded the {MaxFrameBytes}-byte limit.", cancellationToken);
+                    await TrySendErrorAsync(
+                        $"Frame exceeded the {MaxFrameBytes}-byte limit.", CascadeErrorStages.Session, recoverable: false, cancellationToken);
                     return;
                 }
             } while (!result.EndOfMessage);
@@ -615,7 +672,8 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
         {
             logger.LogWarning(
                 "Cascade session {SessionId} received a malformed control message: {Message}", _sessionId, ex.Message);
-            await TrySendErrorAsync($"Malformed control message: {ex.Message}", cancellationToken);
+            await TrySendErrorAsync(
+                $"Malformed control message: {ex.Message}", CascadeErrorStages.Session, recoverable: true, cancellationToken);
             return true;
         }
 
@@ -631,7 +689,8 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
                 return false;
 
             default:
-                await TrySendErrorAsync($"Unknown control message type '{envelope.Type}'.", cancellationToken);
+                await TrySendErrorAsync(
+                    $"Unknown control message type '{envelope.Type}'.", CascadeErrorStages.Session, recoverable: true, cancellationToken);
                 return true;
         }
     }
@@ -640,7 +699,11 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
     {
         if (payload.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
-            await TrySendErrorAsync("session.start requires a payload with sourceLang and targetLang.", cancellationToken);
+            await TrySendErrorAsync(
+                "session.start requires a payload with sourceLang and targetLang.",
+                CascadeErrorStages.Session,
+                recoverable: true,
+                cancellationToken);
             return;
         }
 
@@ -651,13 +714,18 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
         }
         catch (JsonException ex)
         {
-            await TrySendErrorAsync($"Malformed session.start payload: {ex.Message}", cancellationToken);
+            await TrySendErrorAsync(
+                $"Malformed session.start payload: {ex.Message}", CascadeErrorStages.Session, recoverable: true, cancellationToken);
             return;
         }
 
         if (start is null || string.IsNullOrWhiteSpace(start.SourceLang) || string.IsNullOrWhiteSpace(start.TargetLang))
         {
-            await TrySendErrorAsync("session.start requires non-empty sourceLang and targetLang.", cancellationToken);
+            await TrySendErrorAsync(
+                "session.start requires non-empty sourceLang and targetLang.",
+                CascadeErrorStages.Session,
+                recoverable: true,
+                cancellationToken);
             return;
         }
 
@@ -669,7 +737,10 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
                 start.SourceLang,
                 start.TargetLang);
             await TrySendErrorAsync(
-                $"Unsupported language pair '{start.SourceLang}' -> '{start.TargetLang}'.", cancellationToken);
+                $"Unsupported language pair '{start.SourceLang}' -> '{start.TargetLang}'.",
+                CascadeErrorStages.Session,
+                recoverable: true,
+                cancellationToken);
             return;
         }
 
@@ -702,8 +773,12 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
                     // A single bad chunk shouldn't take down the whole session - later
                     // pipeline stages (#5-7) have their own retry/error semantics; the
                     // transport just reports it and keeps forwarding subsequent chunks.
+                    // Stage is stt here (not session) - OnAudioChunkAsync's only job is
+                    // handing PCM to the STT provider, so any exception it lets through
+                    // is necessarily that stage's.
                     logger.LogError(ex, "Cascade session {SessionId} pipeline stage failed on an audio chunk.", _sessionId);
-                    await TrySendErrorAsync("Pipeline error while processing audio.", cancellationToken);
+                    await TrySendErrorAsync(
+                        "Pipeline error while processing audio.", CascadeErrorStages.Stt, recoverable: true, cancellationToken);
                 }
             }
         }
@@ -789,11 +864,20 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
         }
     }
 
-    private async Task TrySendErrorAsync(string message, CancellationToken cancellationToken)
+    /// <param name="message">A human-readable, non-sensitive description of what went wrong.</param>
+    /// <param name="stage">One of <see cref="CascadeErrorStages"/>.</param>
+    /// <param name="recoverable">See <see cref="CascadeErrorPayload.Recoverable"/>.</param>
+    /// <param name="cancellationToken">Propagates send cancellation.</param>
+    /// <param name="utteranceId">See <see cref="CascadeErrorPayload.UtteranceId"/>; <c>null</c>
+    /// for every transport-level error this class sends, since none of them are scoped
+    /// to one utterance.</param>
+    private async Task TrySendErrorAsync(
+        string message, string stage, bool recoverable, CancellationToken cancellationToken, string? utteranceId = null)
     {
         try
         {
-            await SendEventAsync(CascadeMessageTypes.Error, new CascadeErrorPayload(message), cancellationToken);
+            await SendEventAsync(
+                CascadeMessageTypes.Error, new CascadeErrorPayload(message, stage, utteranceId, recoverable), cancellationToken);
         }
         catch (Exception ex)
         {

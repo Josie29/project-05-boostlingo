@@ -63,6 +63,17 @@ public sealed class CascadePipeline(
     private CancellationTokenSource? _pumpCts;
     private CascadeSessionConfig? _config;
 
+    /// <summary>
+    /// Whether <see cref="PumpSegmentsAsync"/> has already attempted its one allowed
+    /// STT (speech-to-text) stream reopen for this session (#12, error handling
+    /// hardening). Set the first time the read loop's stream dies, whatever the
+    /// outcome of that reopen attempt - a second mid-session failure (whether on the
+    /// original stream or a successfully reopened one) always goes straight to a
+    /// session-level, unrecoverable error rather than looping forever reopening a
+    /// stream that keeps dying.
+    /// </summary>
+    private bool _sttReopenAttempted;
+
     /// <inheritdoc />
     /// <remarks>
     /// If the STT provider can't be started (most commonly a missing API key), this
@@ -88,8 +99,14 @@ public sealed class CascadePipeline(
         }
         catch (SttProviderUnavailableException ex)
         {
-            logger.LogError(ex, "Speech-to-text provider could not be started.");
-            await events.SendEventAsync(CascadeMessageTypes.Error, new CascadeErrorPayload(ex.Message), cancellationToken);
+            logger.LogError(
+                ex,
+                "Speech-to-text provider could not be started for session {SessionId} (provider: OpenAI).",
+                events.SessionId);
+            await events.SendEventAsync(
+                CascadeMessageTypes.Error,
+                new CascadeErrorPayload(ex.Message, CascadeErrorStages.Stt, UtteranceId: null, Recoverable: false),
+                cancellationToken);
             return;
         }
 
@@ -118,8 +135,14 @@ public sealed class CascadePipeline(
         }
         catch (SttProviderStreamException ex)
         {
-            logger.LogError(ex, "Speech-to-text provider rejected an audio chunk.");
-            await events.SendEventAsync(CascadeMessageTypes.Error, new CascadeErrorPayload(ex.Message), cancellationToken);
+            logger.LogError(
+                ex,
+                "Speech-to-text provider rejected an audio chunk in session {SessionId} (provider: OpenAI).",
+                events.SessionId);
+            await events.SendEventAsync(
+                CascadeMessageTypes.Error,
+                new CascadeErrorPayload(ex.Message, CascadeErrorStages.Stt, UtteranceId: null, Recoverable: true),
+                cancellationToken);
         }
     }
 
@@ -219,6 +242,15 @@ public sealed class CascadePipeline(
     /// A leading <see cref="SttSegment.SpeechStart"/> marker (#11, barge-in) is handled
     /// the same way: no transcript event, just a call to <see cref="HandleBargeInAsync"/>.
     /// </summary>
+    /// <remarks>
+    /// #12 (error handling hardening): if <paramref name="stream"/> dies mid-session,
+    /// this method sends a recoverable <see cref="CascadeErrorStages.Stt"/> error and
+    /// then attempts exactly one reopen of the STT stream (see <see cref="_sttReopenAttempted"/>
+    /// and <see cref="TryReopenSttStreamAsync"/>) before falling back to an unrecoverable
+    /// <see cref="CascadeErrorStages.Session"/> error. A successful reopen resumes this
+    /// same method on the new stream via a tail-recursive call - the loop above never
+    /// needs to know a reopen happened.
+    /// </remarks>
     private async Task PumpSegmentsAsync(ISttStream stream, ICascadeEventSink events, CancellationToken cancellationToken)
     {
         try
@@ -291,10 +323,78 @@ public sealed class CascadePipeline(
         }
         catch (SttProviderStreamException ex)
         {
-            logger.LogError(ex, "Speech-to-text stream failed.");
-            await events.SendEventAsync(CascadeMessageTypes.Error, new CascadeErrorPayload(ex.Message), cancellationToken);
+            logger.LogError(
+                ex, "Speech-to-text stream failed for session {SessionId} (provider: OpenAI).", events.SessionId);
+            await events.SendEventAsync(
+                CascadeMessageTypes.Error,
+                new CascadeErrorPayload(ex.Message, CascadeErrorStages.Stt, UtteranceId: null, Recoverable: true),
+                cancellationToken);
+
+            if (_sttReopenAttempted)
+            {
+                await SendSttUnrecoverableAsync(events, cancellationToken);
+                return;
+            }
+
+            _sttReopenAttempted = true;
+            var reopened = await TryReopenSttStreamAsync(cancellationToken);
+            if (reopened is null)
+            {
+                await SendSttUnrecoverableAsync(events, cancellationToken);
+                return;
+            }
+
+            await PumpSegmentsAsync(reopened, events, cancellationToken);
         }
     }
+
+    /// <summary>
+    /// Attempts the one STT (speech-to-text) stream reopen <see cref="PumpSegmentsAsync"/>
+    /// allows per session (#12, error handling hardening): disposes the dead
+    /// <see cref="_sttStream"/> and asks <see cref="sttProvider"/> for a fresh one, using
+    /// the same negotiated language hint the session originally started with.
+    /// </summary>
+    /// <param name="cancellationToken">Propagates session cancellation.</param>
+    /// <returns>The new stream, already stored as <see cref="_sttStream"/> for
+    /// <see cref="OnAudioChunkAsync"/> to resume sending audio to, or <c>null</c> if the
+    /// reopen attempt itself failed.</returns>
+    private async Task<ISttStream?> TryReopenSttStreamAsync(CancellationToken cancellationToken)
+    {
+        if (_sttStream is not null)
+        {
+            await _sttStream.DisposeAsync();
+        }
+
+        var sttLanguageHint = Languages.Find(_config!.SourceLang)?.SttLanguageHint ?? _config.SourceLang;
+        try
+        {
+            var stream = await sttProvider.StartStreamAsync(new SttStreamConfig(sttLanguageHint), cancellationToken);
+            _sttStream = stream;
+            return stream;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Failed to reopen the speech-to-text stream after a mid-session failure.");
+            _sttStream = null;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Sends the unrecoverable <see cref="CascadeErrorStages.Session"/> error that
+    /// follows a failed STT (speech-to-text) reopen attempt (#12) - STT is now dead for
+    /// the rest of this session; the client should stop expecting further transcripts
+    /// rather than treating this as a one-off, recoverable hiccup.
+    /// </summary>
+    private static async Task SendSttUnrecoverableAsync(ICascadeEventSink events, CancellationToken cancellationToken) =>
+        await events.SendEventAsync(
+            CascadeMessageTypes.Error,
+            new CascadeErrorPayload(
+                "Speech-to-text is unavailable for the rest of this session.",
+                CascadeErrorStages.Session,
+                UtteranceId: null,
+                Recoverable: false),
+            cancellationToken);
 
     /// <summary>
     /// Serializes machine translation for the session: reads finalized source segments
@@ -415,10 +515,15 @@ public sealed class CascadePipeline(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Machine translation failed for utterance {UtteranceId}.", segment.UtteranceId);
+            logger.LogError(
+                ex,
+                "Machine translation failed for utterance {UtteranceId} in session {SessionId} (provider: OpenAI).",
+                segment.UtteranceId,
+                events.SessionId);
             await events.SendEventAsync(
                 CascadeMessageTypes.Error,
-                new CascadeErrorPayload("Machine translation failed for one utterance."),
+                new CascadeErrorPayload(
+                    "Machine translation failed for one utterance.", CascadeErrorStages.Mt, segment.UtteranceId, Recoverable: true),
                 cancellationToken);
             RemoveInFlightMt(segment.UtteranceId);
             return;

@@ -325,6 +325,8 @@ file sealed class FakeTranslationProvider(Func<TranslationRequest, IAsyncEnumera
 /// </summary>
 file sealed class FakeEventSink : ICascadeEventSink
 {
+    public Guid SessionId { get; } = Guid.NewGuid();
+
     public Channel<(string Type, object? Payload)> Sent { get; } = Channel.CreateUnbounded<(string Type, object? Payload)>();
 
     public Channel<byte[]> Binary { get; } = Channel.CreateUnbounded<byte[]>();

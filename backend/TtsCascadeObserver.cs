@@ -327,10 +327,18 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogError(ex, "Text-to-speech failed for utterance {UtteranceId}.", chunk.TargetUtteranceId);
+            _logger.LogError(
+                ex,
+                "Text-to-speech failed for utterance {UtteranceId} in session {SessionId} (provider: OpenAI).",
+                chunk.TargetUtteranceId,
+                events.SessionId);
             await events.SendEventAsync(
                 CascadeMessageTypes.Error,
-                new CascadeErrorPayload("Text-to-speech failed for one utterance."),
+                // UtteranceId is the source-lane id (see CascadeErrorPayload's remarks),
+                // matching every other stage's error/latency-mark keying even though
+                // this method otherwise tracks the target-lane id.
+                new CascadeErrorPayload(
+                    "Text-to-speech failed for one utterance.", CascadeErrorStages.Tts, chunk.SourceUtteranceId, Recoverable: true),
                 cancellationToken);
         }
         finally

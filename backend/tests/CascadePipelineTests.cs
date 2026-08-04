@@ -94,6 +94,13 @@ public class CascadePipelineTests
         Assert.Equal(CascadeMessageTypes.Error, envelope.Type);
         var payload = Assert.IsType<CascadeErrorPayload>(envelope.Payload);
         Assert.Contains("OpenAI API key", payload.Message);
+
+        // #12: STT never started at all - there is no per-utterance retry that could
+        // fix this, so the whole session's STT is unrecoverable, not scoped to one
+        // utterance.
+        Assert.Equal(CascadeErrorStages.Stt, payload.Stage);
+        Assert.Null(payload.UtteranceId);
+        Assert.False(payload.Recoverable);
     }
 
     /// <summary>
@@ -117,7 +124,8 @@ public class CascadePipelineTests
 
     /// <summary>
     /// Confirms an upstream WebSocket/provider failure mid-session (the stream's
-    /// segment enumerator throwing) surfaces as an error envelope rather than
+    /// segment enumerator throwing) surfaces as a per-stage <c>stt</c> error envelope
+    /// (#12) - recoverable, since a reopen attempt is about to follow - rather than
     /// unhandled-exception-ing the background pump task and killing the process.
     /// </summary>
     [Fact]
@@ -132,10 +140,84 @@ public class CascadePipelineTests
 
         var envelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.Error, envelope.Type);
+        var payload = Assert.IsType<CascadeErrorPayload>(envelope.Payload);
+        Assert.Equal(CascadeErrorStages.Stt, payload.Stage);
+        Assert.True(payload.Recoverable);
 
-        // The session is still usable afterward - ending it must not throw either.
+        // The session is still usable afterward - ending it must not throw either. No
+        // reopenStream was supplied, so the one reopen attempt this triggers (#12) also
+        // fails - see StreamFailureMidSession_ReopenFails_SendsUnrecoverableSessionError
+        // for that envelope's own assertions.
         await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
         Assert.Equal(1, stream.DisposeCount);
+    }
+
+    /// <summary>
+    /// Confirms a mid-session STT (speech-to-text) stream failure attempts exactly one
+    /// reopen (#12) - a second <c>StartStreamAsync</c> call - and, when that succeeds,
+    /// resumes delivering transcripts from the new stream without the client needing to
+    /// restart the session itself.
+    /// </summary>
+    [Fact]
+    public async Task StreamFailureMidSession_ReopenSucceeds_ResumesPumpingFromNewStream()
+    {
+        var deadStream = new FakeSttStream();
+        var newStream = new FakeSttStream();
+        var provider = new FakeSttProvider(deadStream, reopenStream: newStream);
+        var pipeline = CreatePipeline(provider);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        deadStream.Fail(new SttProviderStreamException("Speech-to-text connection dropped."));
+
+        var errorEnvelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
+
+        newStream.Emit(new SttSegment("utt-1", "Hola", IsFinal: true, TimestampMs: 10));
+        var transcriptEnvelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.TranscriptFinal, transcriptEnvelope.Type);
+
+        // Confirms exactly one reopen attempt: the initial start (call 1) plus the one
+        // reopen (call 2), never more even though this test's own assertions could only
+        // ever trigger one failure to begin with.
+        Assert.Equal(2, provider.StartCallCount);
+
+        // Audio chunks must now flow to the reopened stream, not the dead one.
+        await pipeline.OnAudioChunkAsync(new byte[] { 1, 2 }, sink, CancellationToken.None);
+        Assert.Single(newStream.SentAudio);
+        Assert.Empty(deadStream.SentAudio);
+
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Confirms that when the one allowed STT (speech-to-text) reopen attempt (#12)
+    /// itself fails, the client gets a session-level, unrecoverable error - not another
+    /// silent retry loop - so the UI can show persistent "speech recognition is down"
+    /// guidance instead of treating it as a one-off hiccup.
+    /// </summary>
+    [Fact]
+    public async Task StreamFailureMidSession_ReopenFails_SendsUnrecoverableSessionError()
+    {
+        var stream = new FakeSttStream();
+        var provider = new FakeSttProvider(stream); // no reopenStream: the reopen attempt fails too
+        var pipeline = CreatePipeline(provider);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        stream.Fail(new SttProviderStreamException("Speech-to-text connection dropped."));
+
+        var sttErrorEnvelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeErrorStages.Stt, Assert.IsType<CascadeErrorPayload>(sttErrorEnvelope.Payload).Stage);
+
+        var sessionErrorEnvelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.Error, sessionErrorEnvelope.Type);
+        var payload = Assert.IsType<CascadeErrorPayload>(sessionErrorEnvelope.Payload);
+        Assert.Equal(CascadeErrorStages.Session, payload.Stage);
+        Assert.False(payload.Recoverable);
+
+        Assert.Equal(2, provider.StartCallCount);
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
     }
 
     /// <summary>
@@ -297,12 +379,47 @@ public class CascadePipelineTests
         var errorEnvelope = await events.Other.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
 
+        // #12: scoped to this one utterance (mt stage, this utterance's source id) and
+        // recoverable, since a later utterance below still translates successfully.
+        var errorPayload = Assert.IsType<CascadeErrorPayload>(errorEnvelope.Payload);
+        Assert.Equal(CascadeErrorStages.Mt, errorPayload.Stage);
+        Assert.Equal("utt-a", errorPayload.UtteranceId);
+        Assert.True(errorPayload.Recoverable);
+
         stream.Emit(new SttSegment("utt-b", "Good", IsFinal: true, TimestampMs: 20));
 
         var partialB = await events.Target.Reader.ReadAsync(TestTimeout());
         var finalB = await events.Target.Reader.ReadAsync(TestTimeout());
         AssertTargetPayload(partialB, CascadeMessageTypes.TranscriptPartial, "utt-b-target", "Bien");
         AssertTargetPayload(finalB, CascadeMessageTypes.TranscriptFinal, "utt-b-target", "Bien");
+    }
+
+    /// <summary>
+    /// Confirms a finalized STT (speech-to-text) segment with only whitespace text is
+    /// still delivered to the client's source-lane transcript (so the frontend sees the
+    /// speaker's turn ended), but never reaches machine translation at all (#12) - there
+    /// is nothing worth translating, so no request, no error, and no target-lane events
+    /// for it should ever be produced.
+    /// </summary>
+    [Fact]
+    public async Task EmptyFinalSttSegment_SkipsTranslation_NoMtRequest()
+    {
+        var stream = new FakeSttStream();
+        var translationProvider = new FakeTranslationProvider(_ => Tokens("should never be requested"));
+        var pipeline = CreatePipeline(new FakeSttProvider(stream), translationProvider);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        stream.Emit(new SttSegment("utt-1", "   ", IsFinal: true, TimestampMs: 10));
+
+        var envelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.TranscriptFinal, envelope.Type);
+
+        // Draining the session (which awaits the translation pump to finish) guarantees
+        // that if a translation request had been queued, it would have already been
+        // issued to the fake provider by the time we assert below.
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
+        Assert.Empty(translationProvider.Requests);
     }
 
     /// <summary>
@@ -468,6 +585,8 @@ public class CascadePipelineTests
 /// </summary>
 file sealed class FakeEventSink : ICascadeEventSink
 {
+    public Guid SessionId { get; } = Guid.NewGuid();
+
     public System.Threading.Channels.Channel<(string Type, object? Payload)> Sent { get; } =
         System.Threading.Channels.Channel.CreateUnbounded<(string Type, object? Payload)>();
 
@@ -533,19 +652,41 @@ file sealed class LaneSplitEventReader
     }
 }
 
-/// <summary>A controllable <see cref="ISttProvider"/> - either fails to start, or hands back a <see cref="FakeSttStream"/>.</summary>
-file sealed class FakeSttProvider(FakeSttStream? stream = null, Exception? startException = null) : ISttProvider
+/// <summary>
+/// A controllable <see cref="ISttProvider"/> - either fails to start, or hands back a
+/// <see cref="FakeSttStream"/>. <paramref name="reopenStream"/> controls what happens on
+/// the second and later calls (#12, error handling hardening's one-reopen-attempt path
+/// in <c>CascadePipeline.TryReopenSttStreamAsync</c>): supplying it makes the reopen
+/// succeed with a fresh stream; leaving it <c>null</c> (the default) makes every reopen
+/// attempt fail, mirroring a provider that stays down after the first stream died.
+/// </summary>
+file sealed class FakeSttProvider(FakeSttStream? stream = null, Exception? startException = null, FakeSttStream? reopenStream = null)
+    : ISttProvider
 {
     /// <summary>The config the pipeline most recently started a stream with, so tests can
     /// assert the negotiated language actually reached the provider.</summary>
     public SttStreamConfig? LastConfig { get; private set; }
 
+    /// <summary>How many times <see cref="StartStreamAsync"/> has been called - 1 for the
+    /// session's initial start, 2+ for each reopen attempt - so tests can assert a
+    /// reopen was attempted exactly once.</summary>
+    public int StartCallCount { get; private set; }
+
     public Task<ISttStream> StartStreamAsync(SttStreamConfig config, CancellationToken cancellationToken)
     {
+        StartCallCount++;
         LastConfig = config;
-        return startException is not null
-            ? throw startException
-            : Task.FromResult<ISttStream>(stream!);
+
+        if (StartCallCount == 1)
+        {
+            return startException is not null
+                ? throw startException
+                : Task.FromResult<ISttStream>(stream!);
+        }
+
+        return reopenStream is not null
+            ? Task.FromResult<ISttStream>(reopenStream)
+            : throw new SttProviderUnavailableException("Speech-to-text reopen failed.");
     }
 }
 

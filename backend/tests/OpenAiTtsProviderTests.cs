@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Boostlingo.Backend.Tests;
 
@@ -144,8 +145,9 @@ public class OpenAiTtsProviderTests
     }
 
     /// <summary>
-    /// Confirms a non-success upstream response surfaces as TtsProviderException
-    /// rather than an unhandled HTTP exception or silently yielding no audio - the
+    /// Confirms a non-success upstream response - even a transient one that gets one
+    /// retry (#12) - surfaces as TtsProviderException once every attempt is exhausted,
+    /// rather than an unhandled HTTP exception or silently yielding no audio. The
     /// observer relies on this to turn upstream failures into a per-phrase error
     /// envelope without killing the session.
     /// </summary>
@@ -165,13 +167,99 @@ public class OpenAiTtsProviderTests
         await Assert.ThrowsAsync<TtsProviderException>(ConsumeAsync);
     }
 
-    private static OpenAiTtsProvider CreateProvider(HttpMessageHandler handler, string? apiKey)
+    /// <summary>
+    /// Confirms a transient 5xx on the first attempt is retried exactly once (#12,
+    /// error handling hardening) and succeeds on the second - the fake handler's call
+    /// count is the only way to prove a retry actually happened, not just that the
+    /// eventual result looks right.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_TransientServerError_RetriesOnceThenSucceeds()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler(
+            (HttpStatusCode.InternalServerError, Array.Empty<byte>()), (HttpStatusCode.OK, new byte[] { 1, 2, 3 }));
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        var received = new List<byte>();
+        await foreach (var chunk in provider.SynthesizeAsync(new TtsRequest("utt-1", "Hi", "es"), CancellationToken.None))
+        {
+            received.AddRange(chunk.Pcm.ToArray());
+        }
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, received);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    /// <summary>
+    /// Confirms a 400 (validation/auth - not transient) throws immediately with no
+    /// retry - retrying a request OpenAI has already rejected as invalid would fail
+    /// identically the second time, just adding latency for no benefit.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_ClientError_ThrowsWithoutRetrying()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler((HttpStatusCode.BadRequest, Array.Empty<byte>()));
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        async Task ConsumeAsync()
+        {
+            await foreach (var _ in provider.SynthesizeAsync(new TtsRequest("utt-1", "Hi", "es"), CancellationToken.None))
+            {
+            }
+        }
+
+        await Assert.ThrowsAsync<TtsProviderException>(ConsumeAsync);
+        Assert.Single(handler.Requests);
+    }
+
+    /// <summary>
+    /// Confirms a request that never gets a response within the client's configured
+    /// timeout surfaces as a clear TtsProviderException - the observer relies on this
+    /// to turn a hung provider connection into a per-phrase error envelope instead of
+    /// the session hanging forever.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_RequestTimesOut_ThrowsTtsProviderException()
+    {
+        var handler = new DelayingHttpMessageHandler(TimeSpan.FromSeconds(5));
+        var provider = CreateProvider(handler, apiKey: "sk-test", timeout: TimeSpan.FromMilliseconds(50));
+
+        async Task ConsumeAsync()
+        {
+            await foreach (var _ in provider.SynthesizeAsync(new TtsRequest("utt-1", "Hi", "es"), CancellationToken.None))
+            {
+            }
+        }
+
+        await Assert.ThrowsAsync<TtsProviderException>(ConsumeAsync);
+    }
+
+    private static OpenAiTtsProvider CreateProvider(HttpMessageHandler handler, string? apiKey, TimeSpan? timeout = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = apiKey })
             .Build();
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.openai.com/v1/") };
-        return new OpenAiTtsProvider(httpClient, configuration);
+        if (timeout is { } t)
+        {
+            httpClient.Timeout = t;
+        }
+
+        return new OpenAiTtsProvider(httpClient, configuration, NullLogger<OpenAiTtsProvider>.Instance);
+    }
+}
+
+/// <summary>
+/// A fake handler that never responds within <paramref name="delay"/> - long enough
+/// that a short <see cref="HttpClient.Timeout"/> fires first, so tests can exercise the
+/// provider's timeout-handling path without actually waiting for a real timeout.
+/// </summary>
+file sealed class DelayingHttpMessageHandler(TimeSpan delay) : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await Task.Delay(delay, cancellationToken);
+        return new HttpResponseMessage(HttpStatusCode.OK);
     }
 }
 
@@ -190,34 +278,39 @@ file sealed record CapturedRequest(string? Authorization, string Body);
 /// </summary>
 file sealed class FakeChunkedAudioHttpMessageHandler : HttpMessageHandler
 {
-    private readonly HttpStatusCode _statusCode;
-    private readonly byte[] _responseBytes;
+    private readonly List<(HttpStatusCode StatusCode, byte[] Body)> _responses;
 
     public List<CapturedRequest> Requests { get; } = [];
 
-    public FakeChunkedAudioHttpMessageHandler(byte[] responseBytes)
+    public FakeChunkedAudioHttpMessageHandler(byte[] responseBytes) : this([(HttpStatusCode.OK, responseBytes)])
     {
-        _statusCode = HttpStatusCode.OK;
-        _responseBytes = responseBytes;
     }
 
-    public FakeChunkedAudioHttpMessageHandler(HttpStatusCode statusCode)
+    public FakeChunkedAudioHttpMessageHandler(HttpStatusCode statusCode) : this([(statusCode, [])])
     {
-        _statusCode = statusCode;
-        _responseBytes = [];
     }
+
+    /// <summary>
+    /// Scripts one response per call, in order (#12, error handling hardening's retry
+    /// tests) - e.g. a transient failure followed by a success, to prove a retry
+    /// actually happened rather than just that the final result looks right. If more
+    /// calls arrive than responses were scripted, the last response repeats.
+    /// </summary>
+    public FakeChunkedAudioHttpMessageHandler(params (HttpStatusCode StatusCode, byte[] Body)[] responses) => _responses = [.. responses];
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        var (statusCode, responseBytes) = _responses[Math.Min(Requests.Count, _responses.Count - 1)];
+
         // Captured eagerly here, not stored as the live HttpRequestMessage: the
         // provider disposes its request (and its content) once SynthesizeAsync's
         // enumerator finishes, before a test would otherwise get a chance to inspect it.
         var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
         Requests.Add(new CapturedRequest(request.Headers.Authorization?.ToString(), body));
 
-        return new HttpResponseMessage(_statusCode)
+        return new HttpResponseMessage(statusCode)
         {
-            Content = new StreamContent(new MemoryStream(_responseBytes)),
+            Content = new StreamContent(new MemoryStream(responseBytes)),
         };
     }
 }

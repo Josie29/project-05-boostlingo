@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Boostlingo.Backend.Tests;
 
@@ -97,13 +98,123 @@ public class OpenAiTranslationProviderTests
         await Assert.ThrowsAsync<TranslationProviderException>(ConsumeAsync);
     }
 
-    private static OpenAiTranslationProvider CreateProvider(HttpMessageHandler handler, string? apiKey)
+    /// <summary>
+    /// Confirms a transient 5xx on the first attempt is retried exactly once (#12,
+    /// error handling hardening) and succeeds on the second - the fake handler's call
+    /// count is the only way to prove a retry actually happened, not just that the
+    /// eventual result looks right.
+    /// </summary>
+    [Fact]
+    public async Task TranslateAsync_TransientServerError_RetriesOnceThenSucceeds()
+    {
+        var handler = new FakeSseHttpMessageHandler(
+            (HttpStatusCode.InternalServerError, "boom"),
+            (HttpStatusCode.OK, FakeSseHttpMessageHandler.SseBody("Hola")));
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        var tokens = new List<string>();
+        await foreach (var token in provider.TranslateAsync(new TranslationRequest("Hi", "en", "es"), CancellationToken.None))
+        {
+            tokens.Add(token);
+        }
+
+        Assert.Equal(["Hola"], tokens);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    /// <summary>
+    /// Confirms a 429 (rate limited) is treated as transient and retried exactly once,
+    /// same as a 5xx - OpenAI's rate limit responses must not be treated as a
+    /// non-retryable client error.
+    /// </summary>
+    [Fact]
+    public async Task TranslateAsync_RateLimited_RetriesOnceThenSucceeds()
+    {
+        var handler = new FakeSseHttpMessageHandler(
+            (HttpStatusCode.TooManyRequests, "slow down"),
+            (HttpStatusCode.OK, FakeSseHttpMessageHandler.SseBody("Hola")));
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        var tokens = new List<string>();
+        await foreach (var token in provider.TranslateAsync(new TranslationRequest("Hi", "en", "es"), CancellationToken.None))
+        {
+            tokens.Add(token);
+        }
+
+        Assert.Equal(["Hola"], tokens);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    /// <summary>
+    /// Confirms a 400 (validation/auth - not transient) throws immediately with no
+    /// retry - retrying a request OpenAI has already rejected as invalid would fail
+    /// identically the second time, just adding latency for no benefit.
+    /// </summary>
+    [Fact]
+    public async Task TranslateAsync_ClientError_ThrowsWithoutRetrying()
+    {
+        var handler = new FakeSseHttpMessageHandler((HttpStatusCode.BadRequest, "bad request"));
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        async Task ConsumeAsync()
+        {
+            await foreach (var _ in provider.TranslateAsync(new TranslationRequest("Hi", "en", "es"), CancellationToken.None))
+            {
+            }
+        }
+
+        await Assert.ThrowsAsync<TranslationProviderException>(ConsumeAsync);
+        Assert.Single(handler.Requests);
+    }
+
+    /// <summary>
+    /// Confirms a request that never gets a response within the client's configured
+    /// timeout surfaces as a clear TranslationProviderException - the cascade pipeline
+    /// relies on this to turn a hung provider connection into a per-utterance error
+    /// envelope instead of the session hanging forever.
+    /// </summary>
+    [Fact]
+    public async Task TranslateAsync_RequestTimesOut_ThrowsTranslationProviderException()
+    {
+        var handler = new DelayingHttpMessageHandler(TimeSpan.FromSeconds(5));
+        var provider = CreateProvider(handler, apiKey: "sk-test", timeout: TimeSpan.FromMilliseconds(50));
+
+        async Task ConsumeAsync()
+        {
+            await foreach (var _ in provider.TranslateAsync(new TranslationRequest("Hi", "en", "es"), CancellationToken.None))
+            {
+            }
+        }
+
+        await Assert.ThrowsAsync<TranslationProviderException>(ConsumeAsync);
+    }
+
+    private static OpenAiTranslationProvider CreateProvider(HttpMessageHandler handler, string? apiKey, TimeSpan? timeout = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["OPENAI_API_KEY"] = apiKey })
             .Build();
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.openai.com/v1/") };
-        return new OpenAiTranslationProvider(httpClient, configuration);
+        if (timeout is { } t)
+        {
+            httpClient.Timeout = t;
+        }
+
+        return new OpenAiTranslationProvider(httpClient, configuration, NullLogger<OpenAiTranslationProvider>.Instance);
+    }
+}
+
+/// <summary>
+/// A fake handler that never responds within <paramref name="delay"/> - long enough
+/// that a short <see cref="HttpClient.Timeout"/> fires first, so tests can exercise the
+/// provider's timeout-handling path without actually waiting for a real timeout.
+/// </summary>
+file sealed class DelayingHttpMessageHandler(TimeSpan delay) : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await Task.Delay(delay, cancellationToken);
+        return new HttpResponseMessage(HttpStatusCode.OK);
     }
 }
 
@@ -122,22 +233,25 @@ file sealed record CapturedRequest(string? Authorization, string Body);
 /// </summary>
 file sealed class FakeSseHttpMessageHandler : HttpMessageHandler
 {
-    private readonly HttpStatusCode _statusCode;
-    private readonly string _responseBody;
+    private readonly List<(HttpStatusCode StatusCode, string Body)> _responses;
 
     public List<CapturedRequest> Requests { get; } = [];
 
-    public FakeSseHttpMessageHandler(string responseBody)
+    public FakeSseHttpMessageHandler(string responseBody) : this([(HttpStatusCode.OK, responseBody)])
     {
-        _statusCode = HttpStatusCode.OK;
-        _responseBody = responseBody;
     }
 
-    public FakeSseHttpMessageHandler(HttpStatusCode statusCode, string responseBody)
+    public FakeSseHttpMessageHandler(HttpStatusCode statusCode, string responseBody) : this([(statusCode, responseBody)])
     {
-        _statusCode = statusCode;
-        _responseBody = responseBody;
     }
+
+    /// <summary>
+    /// Scripts one response per call, in order (#12, error handling hardening's retry
+    /// tests) - e.g. a transient failure followed by a success, to prove a retry
+    /// actually happened rather than just that the final result looks right. If more
+    /// calls arrive than responses were scripted, the last response repeats.
+    /// </summary>
+    public FakeSseHttpMessageHandler(params (HttpStatusCode StatusCode, string Body)[] responses) => _responses = [.. responses];
 
     /// <summary>Builds a chat-completion SSE body streaming one delta chunk per token, terminated by [DONE].</summary>
     public static string SseBody(params string[] tokens)
@@ -155,15 +269,17 @@ file sealed class FakeSseHttpMessageHandler : HttpMessageHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        var (statusCode, responseBody) = _responses[Math.Min(Requests.Count, _responses.Count - 1)];
+
         // Captured eagerly here, not stored as the live HttpRequestMessage: the
         // provider disposes its request (and its content) once TranslateAsync's
         // enumerator finishes, before a test would otherwise get a chance to inspect it.
         var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
         Requests.Add(new CapturedRequest(request.Headers.Authorization?.ToString(), body));
 
-        return new HttpResponseMessage(_statusCode)
+        return new HttpResponseMessage(statusCode)
         {
-            Content = new StringContent(_responseBody, Encoding.UTF8, "text/event-stream"),
+            Content = new StringContent(responseBody, Encoding.UTF8, "text/event-stream"),
         };
     }
 }
