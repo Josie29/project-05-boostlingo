@@ -1,5 +1,7 @@
 import { useEffect, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import type { LanguagePair } from '../api';
+import { latencyReducer, selectLatencyAverages, selectRecentReports } from '../latency/latencyReducer';
+import { INITIAL_LATENCY_STATE, type LatencyReport, type LatencySessionAverages, type LatencyState } from '../latency/types';
 import { transcriptReducer } from '../transcript/transcriptReducer';
 import {
   INITIAL_TRANSCRIPT_STATE,
@@ -18,6 +20,19 @@ function reduceTranscript(state: TranscriptState, action: TranscriptAction): Tra
   return action.kind === 'reset' ? INITIAL_TRANSCRIPT_STATE : transcriptReducer(state, action.update);
 }
 
+/**
+ * Wraps the pure `latencyReducer` with a `reset` action, mirroring
+ * `reduceTranscript` exactly — a fresh Start clears the previous
+ * conversation's latency reports (issue #10), same as it clears the
+ * transcript, while a mid-session mode switch (`setMode`) never dispatches
+ * `reset`, so both survive across a mode switch identically.
+ */
+type LatencyAction = { kind: 'reset' } | { kind: 'report'; report: LatencyReport };
+
+function reduceLatency(state: LatencyState, action: LatencyAction): LatencyState {
+  return action.kind === 'reset' ? INITIAL_LATENCY_STATE : latencyReducer(state, action.report);
+}
+
 export interface UseInterpreterSessionResult {
   /** The transport the toggle currently has selected. */
   mode: SessionMode;
@@ -28,6 +43,10 @@ export interface UseInterpreterSessionResult {
   switching: boolean;
   /** Live source/target transcript entries for this conversation, preserved across mode switches. */
   transcriptEntries: TranscriptEntry[];
+  /** The most recently appeared utterances' latency breakdowns (issue #10), preserved across mode switches like `transcriptEntries`. */
+  latencyReports: LatencyReport[];
+  /** Session-wide running latency averages, recomputed from every report accumulated so far (issue #10). */
+  latencyAverages: LatencySessionAverages;
   /**
    * Selects the given transport. Pre-session (or once a session has settled
    * into `'error'`), this just changes which transport the next `start()`
@@ -99,9 +118,14 @@ export function useInterpreterSession(
   );
 
   const [transcriptState, dispatchTranscript] = useReducer(reduceTranscript, INITIAL_TRANSCRIPT_STATE);
+  const [latencyState, dispatchLatency] = useReducer(reduceLatency, INITIAL_LATENCY_STATE);
 
   useEffect(() => {
     return activeSession.subscribeToTranscript((update) => dispatchTranscript({ kind: 'update', update }));
+  }, [activeSession]);
+
+  useEffect(() => {
+    return activeSession.subscribeToLatency?.((report) => dispatchLatency({ kind: 'report', report }));
   }, [activeSession]);
 
   useEffect(() => {
@@ -142,9 +166,12 @@ export function useInterpreterSession(
     errorMessage: state.errorMessage,
     switching,
     transcriptEntries: transcriptState.entries,
+    latencyReports: selectRecentReports(latencyState),
+    latencyAverages: selectLatencyAverages(latencyState),
     setMode,
     start: () => {
       dispatchTranscript({ kind: 'reset' });
+      dispatchLatency({ kind: 'reset' });
       void activeSession.start(pair);
     },
     stop: () => activeSession.stop(),

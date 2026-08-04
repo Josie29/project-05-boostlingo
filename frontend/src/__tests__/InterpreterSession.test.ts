@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isLiveStatus, prefixUtteranceId } from '../session/InterpreterSession';
+import { isLiveStatus, prefixId, prefixUtteranceId } from '../session/InterpreterSession';
 import type { TranscriptUpdate } from '../transcript/types';
 
 describe('isLiveStatus', () => {
@@ -41,5 +41,15 @@ describe('prefixUtteranceId', () => {
       text: 'Hola',
       final: false,
     });
+  });
+});
+
+describe('prefixId', () => {
+  // Catches the same cross-transport collision bug prefixUtteranceId guards against,
+  // for latency reports (issue #10), which have no TranscriptUpdate shape to piggyback
+  // on and need this lower-level helper directly.
+  it('namespaces a bare id with the given mode', () => {
+    expect(prefixId('realtime', 'turn-1')).toBe('realtime:turn-1');
+    expect(prefixId('cascade', 'item_1')).toBe('cascade:item_1');
   });
 });

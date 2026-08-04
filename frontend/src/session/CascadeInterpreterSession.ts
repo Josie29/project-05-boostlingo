@@ -2,8 +2,10 @@ import type { LanguagePair } from '../api';
 import { AudioPlaybackQueue } from '../cascade/AudioPlaybackQueue';
 import { CascadeSessionController } from '../cascade/CascadeSessionController';
 import { mapCascadeEventToTranscriptUpdate } from '../cascade/cascadeTranscriptAdapter';
+import { CascadeLatencyTracker } from '../latency/cascadeLatencyAdapter';
+import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
-import { prefixUtteranceId, type InterpreterSession, type SessionState } from './InterpreterSession';
+import { prefixId, prefixUtteranceId, type InterpreterSession, type SessionState } from './InterpreterSession';
 
 /**
  * Thin adapter presenting {@link CascadeSessionController} as an
@@ -20,6 +22,13 @@ import { prefixUtteranceId, type InterpreterSession, type SessionState } from '.
  * mid-utterance silences audio immediately rather than letting
  * already-scheduled chunks keep playing out.
  *
+ * Owns a `CascadeLatencyTracker` (issue #10) the same way: it folds every
+ * `latency.mark` envelope (via the controller's unfiltered event fan-out,
+ * same source `subscribeToTranscript` reads) and every TTS first-chunk
+ * timing sample (via the playback queue) into per-utterance
+ * {@link LatencyReport}s, reset on every `start()` so a new conversation
+ * doesn't inherit a previous one's in-progress utterances.
+ *
  * Owns exactly one controller (and playback queue) for its whole lifetime;
  * `useInterpreterSession` constructs one instance per mode and keeps it
  * alive across mode switches.
@@ -28,14 +37,29 @@ export class CascadeInterpreterSession implements InterpreterSession {
   readonly mode = 'cascade' as const;
   private readonly controller: CascadeSessionController;
   private readonly playbackQueue: AudioPlaybackQueue;
+  private readonly latencyTracker: CascadeLatencyTracker;
+  private readonly latencyListeners = new Set<(report: LatencyReport) => void>();
 
   constructor(
     controller: CascadeSessionController = new CascadeSessionController(),
     playbackQueue: AudioPlaybackQueue = new AudioPlaybackQueue(),
+    latencyTracker: CascadeLatencyTracker = new CascadeLatencyTracker(),
   ) {
     this.controller = controller;
     this.playbackQueue = playbackQueue;
+    this.latencyTracker = latencyTracker;
     this.controller.subscribeToAudio((event) => this.playbackQueue.handleEvent(event));
+    this.controller.subscribeToEvents((event) => this.emitLatencyReport(this.latencyTracker.handleEnvelope(event)));
+    this.playbackQueue.subscribeToFirstChunkTiming((timing) =>
+      this.emitLatencyReport(this.latencyTracker.handleFirstChunkTiming(timing)),
+    );
+  }
+
+  /** Namespaces a report's utteranceId (see `prefixId`'s remarks) and fans it out, unless the tracker had nothing to report (e.g. a non-latency envelope). */
+  private emitLatencyReport(report: LatencyReport | null): void {
+    if (!report) return;
+    const prefixed = { ...report, utteranceId: prefixId(this.mode, report.utteranceId) };
+    for (const listener of this.latencyListeners) listener(prefixed);
   }
 
   getState(): SessionState {
@@ -53,7 +77,15 @@ export class CascadeInterpreterSession implements InterpreterSession {
     });
   }
 
+  subscribeToLatency(listener: (report: LatencyReport) => void): () => void {
+    this.latencyListeners.add(listener);
+    return () => {
+      this.latencyListeners.delete(listener);
+    };
+  }
+
   start(pair: LanguagePair): Promise<void> {
+    this.latencyTracker.reset();
     return this.controller.start(pair);
   }
 

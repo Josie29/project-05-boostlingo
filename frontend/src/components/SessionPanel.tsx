@@ -1,5 +1,7 @@
+import type { LatencyReport, LatencySessionAverages } from '../latency/types';
 import type { SessionMode, SessionStatus } from '../session/InterpreterSession';
 import type { TranscriptEntry } from '../transcript/types';
+import { LatencyPanel } from './LatencyPanel';
 import { TranscriptPanel } from './TranscriptPanel';
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
@@ -28,6 +30,10 @@ export interface SessionPanelProps {
   switching: boolean;
   /** Every transcript entry accumulated so far, across both lanes and (per issue #9) across mode switches. */
   transcriptEntries: TranscriptEntry[];
+  /** The most recently appeared utterances' latency breakdowns (issue #10), preserved across mode switches like `transcriptEntries`. */
+  latencyReports: LatencyReport[];
+  /** Session-wide running latency averages (issue #10). */
+  latencyAverages: LatencySessionAverages;
   /** Called when the listener picks a mode from the toggle — pre-session this just selects it; mid-session it triggers a switch. */
   onModeChange: (mode: SessionMode) => void;
   onStart: () => void;
@@ -52,6 +58,8 @@ export function SessionPanel({
   errorMessage,
   switching,
   transcriptEntries,
+  latencyReports,
+  latencyAverages,
   onModeChange,
   onStart,
   onStop,
@@ -99,7 +107,10 @@ export function SessionPanel({
         </button>
       </div>
 
-      <TranscriptPanel entries={transcriptEntries} />
+      <div className="session-panel__panels">
+        <TranscriptPanel entries={transcriptEntries} />
+        <LatencyPanel mode={mode} recentReports={latencyReports} averages={latencyAverages} />
+      </div>
     </section>
   );
 }

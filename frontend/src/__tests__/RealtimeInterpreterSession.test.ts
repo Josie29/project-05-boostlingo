@@ -85,4 +85,51 @@ describe('RealtimeInterpreterSession', () => {
 
     expect(updates).toEqual([{ utteranceId: 'realtime:item_1', lane: 'source', text: 'Hi', final: false }]);
   });
+
+  // Catches the same cross-transport collision bug as the transcript test above, for
+  // latency reports (issue #10): an unprefixed "turn-1" could collide with a cascade
+  // utteranceId in shared latency state kept across a mode switch.
+  it('prefixes latency report utteranceIds with "realtime:" before notifying subscribers', async () => {
+    const { pc, dataChannel } = fakePeerConnection();
+    const audioElement = new Audio();
+    const controller = new RealtimeSessionController(buildDeps({ createPeerConnection: () => pc }), audioElement);
+    const session = new RealtimeInterpreterSession(controller);
+    const reports: unknown[] = [];
+    session.subscribeToLatency((report) => reports.push(report));
+
+    await session.start({ sourceLang: 'en', targetLang: 'es' });
+    (dataChannel as unknown as { onmessage: (event: { data: string }) => void }).onmessage({
+      data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }),
+    });
+    audioElement.dispatchEvent(new Event('playing'));
+
+    expect(reports).toHaveLength(1);
+    expect((reports[0] as { utteranceId: string; stages: unknown[] }).utteranceId).toBe('realtime:turn-1');
+  });
+
+  // Catches a stale-anchor bug: starting a new conversation on the same, reused
+  // adapter instance (as `useInterpreterSession` does across repeated Start/Stop
+  // cycles) must not let a pending speech_stopped anchor from the previous
+  // conversation pair with a `playing` event from a brand-new one.
+  it('resets the latency tracker on start()', async () => {
+    const { pc, dataChannel } = fakePeerConnection();
+    const audioElement = new Audio();
+    const controller = new RealtimeSessionController(buildDeps({ createPeerConnection: () => pc }), audioElement);
+    const session = new RealtimeInterpreterSession(controller);
+    const reports: unknown[] = [];
+    session.subscribeToLatency((report) => reports.push(report));
+
+    await session.start({ sourceLang: 'en', targetLang: 'es' });
+    (dataChannel as unknown as { onmessage: (event: { data: string }) => void }).onmessage({
+      data: JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }),
+    });
+    session.stop();
+
+    await session.start({ sourceLang: 'en', targetLang: 'es' });
+    audioElement.dispatchEvent(new Event('playing'));
+
+    // If the previous session's speech_stopped anchor had survived reset(), this
+    // playing event would pair with it and fabricate a bogus measurement.
+    expect(reports).toHaveLength(0);
+  });
 });

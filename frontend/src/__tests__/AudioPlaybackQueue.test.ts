@@ -253,4 +253,77 @@ describe('AudioPlaybackQueue', () => {
     const queue = new AudioPlaybackQueue({ createAudioContext: () => toAudioContext(fakeAudioContext().ctx) });
     await expect(queue.stop()).resolves.toBeUndefined();
   });
+
+  describe('first-chunk timing (issue #10)', () => {
+    // Catches the mixing-clock guard this measurement exists to satisfy: both the
+    // "received" and "audible" instants must come from the same local clock
+    // (`deps.now()`/the AudioContext-anchor translation), never a server timestamp —
+    // and the reported span must reflect real queueing delay, not always be zero.
+    // A second utterance whose audio is scheduled to start only once the first
+    // utterance's backlog finishes playing (nextStartTime ahead of currentTime) is
+    // exactly the case where that delay is nonzero and worth catching a regression in.
+    it('reports a nonzero client receive-to-audible span when the new utterance must wait behind already-queued audio', () => {
+      const now = vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(500);
+      const { queue, sources } = buildQueue({ now });
+      const timings: unknown[] = [];
+      queue.subscribeToFirstChunkTiming((timing) => timings.push(timing));
+
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) }); // schedules [0, 1)
+      queue.handleEvent({ kind: 'start', utteranceId: 'u2', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u2', data: pcmChunkOf(24_000) }); // must wait until t=1
+
+      expect(sources[1].start).toHaveBeenCalledWith(1);
+      expect(timings).toEqual([
+        { utteranceId: 'u1', clientReceiveToAudibleMs: 0 },
+        { utteranceId: 'u2', clientReceiveToAudibleMs: 500 },
+      ]);
+    });
+
+    // Catches a double-report bug: only an utterance's *first* chunk should produce a
+    // timing sample — later chunks of the same utterance are mid-stream, not a fresh
+    // "how long until this utterance's audio started" measurement.
+    it('does not report timing again for a second chunk of the same utterance', () => {
+      const { queue } = buildQueue();
+      const timings: unknown[] = [];
+      queue.subscribeToFirstChunkTiming((timing) => timings.push(timing));
+
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      expect(timings).toHaveLength(1);
+    });
+
+    // Catches an edge case the zero-length-chunk guard could otherwise break: a
+    // leading empty binary frame (schedules nothing, per the existing zero-length
+    // test above) must not itself count as "the first chunk" — the next *real* chunk
+    // still owes a timing report.
+    it('skips a zero-length leading chunk and reports timing on the next real one instead', () => {
+      const { queue } = buildQueue();
+      const timings: unknown[] = [];
+      queue.subscribeToFirstChunkTiming((timing) => timings.push(timing));
+
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: new ArrayBuffer(0) });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      expect(timings).toHaveLength(1);
+      expect((timings[0] as { utteranceId: string }).utteranceId).toBe('u1');
+    });
+
+    // Catches an unsubscribe-doesn't-work bug: a listener that's already
+    // unsubscribed must not still receive later timing samples.
+    it('stops notifying a listener once unsubscribed', () => {
+      const { queue } = buildQueue();
+      const timings: unknown[] = [];
+      const unsubscribe = queue.subscribeToFirstChunkTiming((timing) => timings.push(timing));
+      unsubscribe();
+
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      expect(timings).toHaveLength(0);
+    });
+  });
 });

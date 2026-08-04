@@ -1,4 +1,5 @@
 import type { LanguagePair } from '../api';
+import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
 
 /**
@@ -34,6 +35,7 @@ export function isLiveStatus(status: SessionStatus): boolean {
 
 type StateListener = (state: SessionState) => void;
 type TranscriptListener = (update: TranscriptUpdate) => void;
+type LatencyListener = (report: LatencyReport) => void;
 type Unsubscribe = () => void;
 
 /**
@@ -63,6 +65,17 @@ export interface InterpreterSession {
    * function.
    */
   subscribeToTranscript(listener: TranscriptListener): Unsubscribe;
+  /**
+   * Subscribes to mode-agnostic {@link LatencyReport}s (issue #10), already
+   * folded from whichever mode-specific signals this transport has
+   * available (per-stage server marks for cascade; a single coarse
+   * end-to-end measurement for Realtime — see `realtimeLatencyAdapter.ts`).
+   * Optional so a future transport with no latency instrumentation at all
+   * can simply omit it rather than implementing a no-op; both current
+   * adapters (`RealtimeInterpreterSession`, `CascadeInterpreterSession`)
+   * implement it. Returns an unsubscribe function.
+   */
+  subscribeToLatency?(listener: LatencyListener): Unsubscribe;
   /** Requests mic access and opens the session for the given language pair. A no-op while already live; call `stop()` first to retry from `'error'`. */
   start(pair: LanguagePair): Promise<void>;
   /** Tears the session down cleanly (safe to call from any state, including already idle). */
@@ -70,16 +83,21 @@ export interface InterpreterSession {
 }
 
 /**
- * Namespaces a transcript update's `utteranceId` by which transport produced
- * it. Both transports mint their ids from OpenAI's own STT (Speech-to-Text)
- * output (`item_id` on Realtime's data channel; the same field name via
- * `OpenAiSttProvider` on cascade's `transcript.*` envelopes — see
- * `backend/Providers/OpenAiSttProvider.cs`), so without this, an id from one
- * mode could collide with an id from the other in the transcript kept across
- * a mid-session switch (issue #9) and silently merge two unrelated
- * utterances into one entry. Called by each adapter's
- * `subscribeToTranscript`, never by shared UI.
+ * Namespaces any transport-produced id by which mode produced it. Both
+ * transports mint their transcript/latency utterance ids from OpenAI's own
+ * STT (Speech-to-Text) output (`item_id` on Realtime's data channel; the
+ * same field name via `OpenAiSttProvider` on cascade's `transcript.*`/
+ * `latency.mark` envelopes — see `backend/Providers/OpenAiSttProvider.cs`),
+ * so without this, an id from one mode could collide with an id from the
+ * other in state kept across a mid-session switch (issue #9) and silently
+ * merge two unrelated utterances into one entry. Called by each adapter's
+ * `subscribeToTranscript`/`subscribeToLatency`, never by shared UI.
  */
+export function prefixId(mode: SessionMode, id: string): string {
+  return `${mode}:${id}`;
+}
+
+/** {@link prefixId}, specialized to a {@link TranscriptUpdate}'s `utteranceId` — see `prefixId`'s remarks for why this matters. */
 export function prefixUtteranceId(mode: SessionMode, update: TranscriptUpdate): TranscriptUpdate {
-  return { ...update, utteranceId: `${mode}:${update.utteranceId}` };
+  return { ...update, utteranceId: prefixId(mode, update.utteranceId) };
 }

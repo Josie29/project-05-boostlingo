@@ -53,6 +53,14 @@ export const CascadeMessageType = {
    * See {@link CascadeTtsAudioEndPayload}.
    */
   TtsAudioEnd: 'tts.audio.end',
+  /**
+   * Server to client: one pipeline stage boundary was just reached for one
+   * utterance (issue #10, per-stage latency instrumentation). See
+   * `../latency/cascadeLatencyAdapter.ts`, the only place besides
+   * `CascadeSessionController`'s unfiltered fan-out that should ever inspect
+   * this envelope type.
+   */
+  LatencyMark: 'latency.mark',
 } as const;
 
 /** Payload the server echoes on `session.ready`, matching `CascadeSessionReadyPayload`. */

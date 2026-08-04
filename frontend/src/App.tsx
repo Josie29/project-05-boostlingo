@@ -38,11 +38,12 @@ function App() {
           errorMessage={session.errorMessage}
           switching={session.switching}
           transcriptEntries={session.transcriptEntries}
+          latencyReports={session.latencyReports}
+          latencyAverages={session.latencyAverages}
           onModeChange={session.setMode}
           onStart={session.start}
           onStop={session.stop}
         />
-        <p className="app-shell__placeholder">Latency instrumentation lands here.</p>
       </main>
     </div>
   );

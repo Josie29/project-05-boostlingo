@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionPanel } from '../components/SessionPanel';
 import type { SessionPanelProps } from '../components/SessionPanel';
+import { EMPTY_LATENCY_AVERAGES } from '../latency/types';
 
 function renderPanel(overrides: Partial<SessionPanelProps> = {}) {
   const props: SessionPanelProps = {
@@ -10,6 +11,8 @@ function renderPanel(overrides: Partial<SessionPanelProps> = {}) {
     errorMessage: null,
     switching: false,
     transcriptEntries: [],
+    latencyReports: [],
+    latencyAverages: EMPTY_LATENCY_AVERAGES,
     onModeChange: vi.fn(),
     onStart: vi.fn(),
     onStop: vi.fn(),
@@ -87,6 +90,21 @@ describe('SessionPanel', () => {
 
     const sourceColumn = screen.getByText('Source').closest('.transcript-panel__column');
     expect(sourceColumn).toContainElement(screen.getByText('Hello there'));
+  });
+
+  // Catches the bug where the panel drops or duplicates whatever latency reports it
+  // was handed instead of forwarding them straight to the shared LatencyPanel (issue #10).
+  it('forwards latencyReports and latencyAverages to the shared latency panel', () => {
+    renderPanel({
+      status: 'connected',
+      latencyReports: [{ utteranceId: 'cascade:item_1', stages: [{ stage: 'sttFinal', ms: 210 }], endToEndMs: 900 }],
+      latencyAverages: { sampleCount: 1, stageAverages: [{ stage: 'sttFinal', ms: 150 }], endToEndAverageMs: 800 },
+    });
+
+    expect(screen.getByText('Avg end-to-end: 800ms')).toBeInTheDocument();
+    expect(screen.getByText('sttFinal: 150ms')).toBeInTheDocument();
+    expect(screen.getByText('900ms')).toBeInTheDocument();
+    expect(screen.getByText('sttFinal: 210ms')).toBeInTheDocument();
   });
 
   // Catches the bug where a backend error surfaces silently (or not at all) instead

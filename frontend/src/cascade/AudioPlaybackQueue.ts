@@ -1,15 +1,33 @@
 import { pcm16LeToFloat32 } from './audioDecoding';
 import type { CascadeAudioEvent } from './CascadeSessionController';
 
-/** Collaborator the queue needs, swappable in tests for jsdom's lack of a real Web Audio API. */
+/** Collaborators the queue needs, swappable in tests for jsdom's lack of a real Web Audio API/`performance.now()` determinism. */
 export interface AudioPlaybackQueueDeps {
   /** Creates a fresh AudioContext, lazily, the first time this queue needs one. */
   createAudioContext: () => AudioContext;
+  /** The local (client) clock used for first-chunk latency timing (issue #10) — real `performance.now()` in production. */
+  now: () => number;
 }
 
 function defaultDeps(): AudioPlaybackQueueDeps {
-  return { createAudioContext: () => new AudioContext() };
+  return { createAudioContext: () => new AudioContext(), now: () => performance.now() };
 }
+
+/**
+ * One utterance's TTS-chunk local-clock timing (issue #10): the span from
+ * when its first audio chunk was received off the wire to when Web Audio
+ * actually schedules it to become audible. Both ends of this span are read
+ * from the same local clock (`AudioPlaybackQueueDeps.now`) — never a
+ * server timestamp — so the resulting `clientReceiveToAudibleMs` is always a
+ * same-clock subtraction, per the clock-discipline issue #10 specifies.
+ */
+export interface FirstChunkTiming {
+  /** The utteranceId as seen on `CascadeAudioEvent` — the *target*-lane id, not the source-lane id `latency.mark`s use (see `cascadeLatencyAdapter.ts`'s `toSourceUtteranceId`). */
+  utteranceId: string;
+  clientReceiveToAudibleMs: number;
+}
+
+type FirstChunkTimingListener = (timing: FirstChunkTiming) => void;
 
 /**
  * Schedules a stream of raw PCM16LE mono TTS (Text-to-Speech) audio chunks —
@@ -46,6 +64,12 @@ export class AudioPlaybackQueue {
   /** Sample rate of the utterance currently in flight, echoed on its `tts.audio.start` event. */
   private currentSampleRateHz = 24_000;
   private readonly activeSources = new Set<AudioBufferSourceNode>();
+  private readonly firstChunkListeners = new Set<FirstChunkTimingListener>();
+  /** Set on `'start'` to the utteranceId whose *next* chunk (its first) should report {@link FirstChunkTiming}; cleared once that report fires, so later chunks of the same utterance don't re-report. */
+  private pendingFirstChunkUtteranceId: string | null = null;
+  /** `deps.now()` reading and AudioContext `currentTime` reading taken together when the current AudioContext was created — the anchor {@link enqueueChunk} uses to translate an AudioContext-clock schedule time into an equivalent local-clock (`deps.now()`) instant, since both clocks advance in lockstep once anchored (both track real elapsed time from that shared instant). */
+  private contextAnchorNowMs = 0;
+  private contextAnchorTime = 0;
 
   constructor(deps: Partial<AudioPlaybackQueueDeps> = {}) {
     this.deps = { ...defaultDeps(), ...deps };
@@ -53,31 +77,46 @@ export class AudioPlaybackQueue {
 
   /**
    * Feeds one audio event from `CascadeSessionController.subscribeToAudio`
-   * into the queue. `'start'` just records the format for the chunks that
-   * follow; the scheduling cursor is deliberately *not* reset here — an
-   * utterance boundary shouldn't introduce a gap (or worse, a jump backward)
-   * if the previous utterance's audio is still scheduled to play out, and
-   * the `max()` in {@link enqueueChunk} already handles the "queue ran dry"
-   * case on its own. `'end'` is a no-op: the chunks already scheduled keep
+   * into the queue. `'start'` records the format for the chunks that
+   * follow and arms the next chunk to report its {@link FirstChunkTiming};
+   * the scheduling cursor is deliberately *not* reset here — an utterance
+   * boundary shouldn't introduce a gap (or worse, a jump backward) if the
+   * previous utterance's audio is still scheduled to play out, and the
+   * `max()` in {@link enqueueChunk} already handles the "queue ran dry" case
+   * on its own. `'end'` is a no-op: the chunks already scheduled keep
    * playing on their own schedule regardless.
    */
   handleEvent(event: CascadeAudioEvent): void {
     switch (event.kind) {
       case 'start':
         this.currentSampleRateHz = event.sampleRateHz;
+        this.pendingFirstChunkUtteranceId = event.utteranceId;
         break;
       case 'chunk':
-        this.enqueueChunk(event.data);
+        this.enqueueChunk(event.data, event.utteranceId);
         break;
       case 'end':
         break;
     }
   }
 
+  /**
+   * Subscribes to {@link FirstChunkTiming} — one sample per utterance, fired
+   * the moment its first non-empty chunk is scheduled. Returns an
+   * unsubscribe function.
+   */
+  subscribeToFirstChunkTiming(listener: FirstChunkTimingListener): () => void {
+    this.firstChunkListeners.add(listener);
+    return () => {
+      this.firstChunkListeners.delete(listener);
+    };
+  }
+
   /** Decodes one PCM16LE chunk and schedules it immediately after whatever's already queued. */
-  private enqueueChunk(data: ArrayBuffer): void {
+  private enqueueChunk(data: ArrayBuffer, utteranceId: string): void {
     if (data.byteLength === 0) return; // An empty binary frame would make Web Audio reject a zero-length AudioBuffer.
 
+    const receivedAtMs = this.deps.now();
     const audioContext = this.ensureContext();
     const samples = pcm16LeToFloat32(data);
 
@@ -95,6 +134,18 @@ export class AudioPlaybackQueue {
     source.start(startTime);
     this.nextStartTime = startTime + buffer.duration;
     this.activeSources.add(source);
+
+    if (this.pendingFirstChunkUtteranceId === utteranceId) {
+      this.pendingFirstChunkUtteranceId = null;
+      // Both terms below come from this queue's own local clock (`receivedAtMs`
+      // directly; `audibleAtMs` via the AudioContext-anchor translation) — never a
+      // server timestamp — so this subtraction never mixes clocks (issue #10).
+      const audibleAtMs = this.contextAnchorNowMs + (startTime - this.contextAnchorTime) * 1000;
+      const clientReceiveToAudibleMs = audibleAtMs - receivedAtMs;
+      for (const listener of this.firstChunkListeners) {
+        listener({ utteranceId, clientReceiveToAudibleMs });
+      }
+    }
   }
 
   /** Lazily creates the AudioContext this queue schedules chunks against. */
@@ -102,6 +153,8 @@ export class AudioPlaybackQueue {
     if (!this.audioContext) {
       this.audioContext = this.deps.createAudioContext();
       this.nextStartTime = this.audioContext.currentTime;
+      this.contextAnchorNowMs = this.deps.now();
+      this.contextAnchorTime = this.audioContext.currentTime;
     }
     return this.audioContext;
   }
@@ -126,6 +179,7 @@ export class AudioPlaybackQueue {
     }
     this.activeSources.clear();
     this.nextStartTime = 0;
+    this.pendingFirstChunkUtteranceId = null;
 
     if (this.audioContext) {
       await this.audioContext.close();

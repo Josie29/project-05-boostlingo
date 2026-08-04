@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
+import { EMPTY_LATENCY_AVERAGES } from '../latency/types';
 import { useInterpreterSession } from '../session/useInterpreterSession';
 import type { UseInterpreterSessionResult } from '../session/useInterpreterSession';
 
@@ -22,6 +23,8 @@ function stubHook(overrides: Partial<UseInterpreterSessionResult> = {}): void {
     errorMessage: null,
     switching: false,
     transcriptEntries: [],
+    latencyReports: [],
+    latencyAverages: EMPTY_LATENCY_AVERAGES,
     setMode: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),

@@ -129,6 +129,86 @@ describe('CascadeInterpreterSession', () => {
     expect(updates).toEqual([{ utteranceId: 'cascade:item_1', lane: 'source', text: 'Hola', final: false }]);
   });
 
+  // Catches the same cross-transport collision bug as the transcript test above, for
+  // latency reports (issue #10): an unprefixed cascade utteranceId could collide with
+  // a realtime one in shared latency state kept across a mode switch.
+  it('prefixes latency report utteranceIds with "cascade:" before notifying subscribers', async () => {
+    const ws = fakeWebSocket();
+    const controller = new CascadeSessionController(buildControllerDeps({ createWebSocket: () => toWebSocket(ws) }));
+    const session = new CascadeInterpreterSession(controller, new AudioPlaybackQueue({ createAudioContext: fakeAudioContext }));
+    const reports: unknown[] = [];
+    session.subscribeToLatency((report) => reports.push(report));
+
+    const startPromise = session.start({ sourceLang: 'en', targetLang: 'es' });
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'latency.mark',
+        payload: { utteranceId: 'item_1', stage: 'speechEnd', serverTimeMs: 1_000 },
+      }),
+    });
+
+    expect(reports).toEqual([{ utteranceId: 'cascade:item_1', stages: [], endToEndMs: null }]);
+  });
+
+  // Catches a stale-data bug: starting a new conversation on the same, reused adapter
+  // instance (as `useInterpreterSession` does across repeated Start/Stop cycles) must
+  // not let an in-progress utterance from the previous conversation bleed into the
+  // new one's reports.
+  it('resets the latency tracker on start(), across repeated start/stop cycles', async () => {
+    const sockets: FakeWebSocket[] = [];
+    const controller = new CascadeSessionController(
+      buildControllerDeps({
+        createWebSocket: () => {
+          const ws = fakeWebSocket();
+          sockets.push(ws);
+          return toWebSocket(ws);
+        },
+      }),
+    );
+    const session = new CascadeInterpreterSession(controller, new AudioPlaybackQueue({ createAudioContext: fakeAudioContext }));
+    const reports: unknown[] = [];
+    session.subscribeToLatency((report) => reports.push(report));
+
+    const firstStart = session.start({ sourceLang: 'en', targetLang: 'es' });
+    await vi.waitFor(() => {
+      if (!sockets[0]?.onopen) throw new Error('First socket not yet attached.');
+    });
+    completeHandshake(sockets[0]);
+    await firstStart;
+    sockets[0].onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'latency.mark',
+        payload: { utteranceId: 'item_1', stage: 'speechEnd', serverTimeMs: 1_000 },
+      }),
+    });
+    session.stop();
+    reports.length = 0;
+
+    const secondStart = session.start({ sourceLang: 'en', targetLang: 'es' });
+    await vi.waitFor(() => {
+      if (!sockets[1]?.onopen) throw new Error('Second socket not yet attached.');
+    });
+    completeHandshake(sockets[1]);
+    await secondStart;
+    sockets[1].onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'latency.mark',
+        payload: { utteranceId: 'item_1', stage: 'sttFinal', serverTimeMs: 5_000 },
+      }),
+    });
+
+    // If the previous session's speechEnd mark had survived, sttFinal would report a
+    // (bogus, huge) delta against it instead of being the first mark seen again.
+    expect(reports).toEqual([{ utteranceId: 'cascade:item_1', stages: [], endToEndMs: null }]);
+  });
+
   // Catches a leak where switching away from Cascade mid-utterance leaves TTS audio
   // scheduled to keep playing (or its AudioContext open) even though the session
   // it belonged to was torn down.
