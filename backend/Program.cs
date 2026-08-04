@@ -9,8 +9,17 @@ builder.Services.AddHttpClient<IRealtimeSessionClient, OpenAiRealtimeSessionClie
     client.Timeout = TimeSpan.FromSeconds(15);
 });
 
-// The cascade pipeline stub until #5-7 (STT/MT/TTS) land behind ICascadePipeline.
-builder.Services.AddSingleton<ICascadePipeline, NoOpCascadePipeline>();
+// STT (speech-to-text; #5) provider and the raw OpenAI WebSocket it streams over.
+// Both are stateless factories, so singleton is safe - per-session state lives in the
+// ISttStream/IRealtimeSocket instances they hand out, not in these classes themselves.
+builder.Services.AddSingleton<IRealtimeSocketFactory, ClientWebSocketRealtimeSocketFactory>();
+builder.Services.AddSingleton<ISttProvider, OpenAiSttProvider>();
+
+// The real cascade pipeline (STT live; MT/TTS land behind the same ICascadePipeline in
+// #6-7). Scoped, not singleton: CascadePipeline holds per-session mutable state (the
+// open STT stream and its draining task), and ASP.NET Core gives each WebSocket
+// upgrade request its own DI scope for the lifetime of the connection.
+builder.Services.AddScoped<ICascadePipeline, CascadePipeline>();
 
 var app = builder.Build();
 

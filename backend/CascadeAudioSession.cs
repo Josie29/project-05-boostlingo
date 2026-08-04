@@ -94,6 +94,25 @@ public static class CascadeMessageTypes
 
     /// <summary>Server to client: a non-fatal problem the client should surface to the user.</summary>
     public const string Error = "error";
+
+    /// <summary>Server to client: an in-progress (not yet settled) transcript segment.</summary>
+    public const string TranscriptPartial = "transcript.partial";
+
+    /// <summary>Server to client: the settled transcript text for one utterance.</summary>
+    public const string TranscriptFinal = "transcript.final";
+}
+
+/// <summary>
+/// String constants for the <c>lane</c> field of <see cref="CascadeTranscriptPayload"/>,
+/// identifying which transcript column on the client a segment belongs to.
+/// </summary>
+public static class CascadeTranscriptLanes
+{
+    /// <summary>The speaker's own language, as recognized by STT (speech-to-text; #5).</summary>
+    public const string Source = "source";
+
+    /// <summary>The interpreted language, once MT (machine translation; #6) lands.</summary>
+    public const string Target = "target";
 }
 
 /// <summary>
@@ -133,6 +152,18 @@ public sealed record CascadeSessionReadyPayload(int SampleRateHz, string Encodin
 /// <summary>Payload for <see cref="CascadeMessageTypes.Error"/>.</summary>
 /// <param name="Message">A human-readable, non-sensitive description of what went wrong.</param>
 public sealed record CascadeErrorPayload(string Message);
+
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.TranscriptPartial"/> and
+/// <see cref="CascadeMessageTypes.TranscriptFinal"/>. The frontend's transport-agnostic
+/// <c>TranscriptUpdate</c> type maps directly onto this shape.
+/// </summary>
+/// <param name="UtteranceId">Stable id shared by every partial and the one final event
+/// for the same utterance, so the client replaces rather than appends.</param>
+/// <param name="Lane">One of <see cref="CascadeTranscriptLanes"/>.</param>
+/// <param name="Text">The transcript text recognized so far (partial) or in full (final).</param>
+/// <param name="TimestampMs">Milliseconds since the session's audio stream started.</param>
+public sealed record CascadeTranscriptPayload(string UtteranceId, string Lane, string Text, long TimestampMs);
 
 /// <summary>The negotiated configuration for one cascade session, taken from <see cref="CascadeSessionStartPayload"/>.</summary>
 /// <param name="SourceLang">Language tag the speaker is using.</param>
