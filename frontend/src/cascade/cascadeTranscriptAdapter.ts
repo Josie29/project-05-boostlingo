@@ -1,5 +1,5 @@
 import type { TranscriptLane, TranscriptUpdate } from '../transcript/types';
-import { CascadeMessageType, type CascadeTranscriptPayload } from './types';
+import { CascadeMessageType, type CascadeTranscriptPayload, type CascadeTranscriptTruncatedPayload } from './types';
 
 /**
  * Translates raw `{ v, type, payload }` envelopes off the cascade WebSocket
@@ -54,15 +54,36 @@ function readTranscriptPayload(payload: unknown): CascadeTranscriptPayload | nul
   };
 }
 
+/** Narrows an unknown envelope's `payload` to the id a `transcript.truncated` update needs, or `null` if missing/mistyped. */
+function readTruncatedPayload(payload: unknown): CascadeTranscriptTruncatedPayload | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const candidate = payload as Partial<CascadeTranscriptTruncatedPayload>;
+  return typeof candidate.utteranceId === 'string' ? { utteranceId: candidate.utteranceId } : null;
+}
+
 /**
  * Maps one raw cascade WebSocket envelope (already JSON-parsed) to a
  * {@link TranscriptUpdate}, or `null` if the envelope isn't a transcript
  * event (`session.ready`/`error`/etc.), carries an unrecognized `lane`, or
  * is missing the fields needed to place it.
+ *
+ * `transcript.truncated` (issue #11) is handled separately from
+ * `.partial`/`.final`: its payload carries only an id, always the
+ * *target*-lane one (the same id space `tts.audio.start`/`.end` use — see
+ * {@link CascadeTranscriptTruncatedPayload}), so the resulting update is
+ * always `lane: 'target'` and carries `truncated: true`. `text`/`final` are
+ * filled in for {@link TranscriptUpdate}'s shape but are never read by the
+ * reducer for a truncated update — see `transcriptReducer.ts`.
  */
 export function mapCascadeEventToTranscriptUpdate(rawEvent: unknown): TranscriptUpdate | null {
   if (typeof rawEvent !== 'object' || rawEvent === null) return null;
   const envelope = rawEvent as CascadeEnvelopeShape;
+
+  if (envelope.type === CascadeMessageType.TranscriptTruncated) {
+    const truncatedPayload = readTruncatedPayload(envelope.payload);
+    if (!truncatedPayload) return null;
+    return { utteranceId: truncatedPayload.utteranceId, lane: 'target', text: '', final: true, truncated: true };
+  }
 
   const isPartial = envelope.type === CascadeMessageType.TranscriptPartial;
   const isFinal = envelope.type === CascadeMessageType.TranscriptFinal;

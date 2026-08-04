@@ -71,6 +71,21 @@ describe('RealtimeSessionController', () => {
     vi.restoreAllMocks();
   });
 
+  // Catches the echo-cancellation regression this issue is about: without
+  // explicit constraints, a browser's getUserMedia default could omit echo
+  // cancellation entirely on some platforms, letting the remote interpreter's
+  // own playback re-enter the mic and self-trigger OpenAI's server-side VAD.
+  it('requests the mic with explicit echo-cancellation constraints', async () => {
+    const deps = buildDeps();
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+
+    expect(deps.getUserMedia).toHaveBeenCalledWith({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  });
+
   it('reaches "connected" on a full happy-path negotiation', async () => {
     const deps = buildDeps();
     const controller = new RealtimeSessionController(deps);

@@ -254,6 +254,117 @@ describe('AudioPlaybackQueue', () => {
     await expect(queue.stop()).resolves.toBeUndefined();
   });
 
+  describe('flush (issue #11 barge-in)', () => {
+    // Catches the core barge-in playback bug: if a superseded utterance's
+    // already-scheduled chunks kept playing after a bargein envelope, the
+    // caller would keep hearing the old (now-wrong) interpretation talk over
+    // whatever comes next, defeating the whole point of barge-in.
+    it('stops and disconnects every scheduled source for the utterance currently playing when it is named in supersededUtteranceIds', () => {
+      const { queue, sources } = buildQueue();
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      queue.flush(['u1']);
+
+      for (const source of sources) {
+        expect(source.stop).toHaveBeenCalledOnce();
+        expect(source.disconnect).toHaveBeenCalledOnce();
+      }
+    });
+
+    // Catches the "dead air until the old utterance would have finished" bug:
+    // without resetting the scheduling cursor, the next utterance's first
+    // chunk would still be scheduled to start wherever the flushed
+    // utterance's audio would have ended, producing a silent gap instead of
+    // instant playback the moment the new utterance's audio arrives.
+    it('resets the scheduling cursor so the next chunk (a new utterance) plays immediately', () => {
+      const { queue, ctx, sources } = buildQueue();
+      ctx.currentTime = 1;
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) }); // scheduled [1, 2)
+
+      ctx.currentTime = 1.2; // barge-in happens partway through playback
+      queue.flush(['u1']);
+
+      queue.handleEvent({ kind: 'start', utteranceId: 'u2', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u2', data: pcmChunkOf(24_000) });
+
+      expect(sources[1].start).toHaveBeenCalledWith(1.2);
+    });
+
+    // Catches the "flush tore down the whole audio pipeline" bug: unlike
+    // stop() (a session teardown), a barge-in happens mid-session — closing
+    // the AudioContext here would mean every subsequent utterance in the
+    // same session pays to reopen one, and briefly has no audio destination
+    // at all.
+    it('does not close the AudioContext', () => {
+      const { queue, ctx } = buildQueue();
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      queue.flush(['u1']);
+
+      expect(ctx.close).not.toHaveBeenCalled();
+    });
+
+    // Catches an over-eager-flush bug: a bargein envelope naming ids this
+    // queue never scheduled anything for (e.g. queued-but-unstarted phrases
+    // the backend dropped before ever calling the TTS provider) must not
+    // touch whatever this queue *is* currently playing.
+    it('is a no-op when the currently-playing utterance is not among the superseded ids', () => {
+      const { queue, sources } = buildQueue();
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      queue.flush(['some-other-utterance']);
+
+      expect(sources[0].stop).not.toHaveBeenCalled();
+    });
+
+    // Catches a crash/no-audio-yet edge case: a barge-in for an utterance
+    // whose tts.audio.start hasn't produced any chunks yet (or arrived at
+    // all) must not throw just because no AudioContext exists yet.
+    it('is a no-op that does not throw when nothing has ever been scheduled', () => {
+      const queue = new AudioPlaybackQueue({ createAudioContext: () => toAudioContext(fakeAudioContext().ctx) });
+
+      expect(() => queue.flush(['u1'])).not.toThrow();
+    });
+
+    // Catches a "flush via handleEvent doesn't route correctly" bug: this is
+    // how `CascadeInterpreterSession` actually delivers a barge-in in
+    // production — through the same `handleEvent` channel as every other
+    // audio event — so a 'bargein' case that didn't call flush() would leave
+    // production wiring silently broken even with flush() itself well-tested.
+    it("routes a 'bargein' CascadeAudioEvent through handleEvent to the same effect as calling flush() directly", () => {
+      const { queue, ctx, sources } = buildQueue();
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      queue.handleEvent({ kind: 'bargein', supersededUtteranceIds: ['u1'] });
+
+      expect(sources[0].stop).toHaveBeenCalledOnce();
+      expect(ctx.close).not.toHaveBeenCalled();
+    });
+
+    // Catches a stale-window bug: once an utterance's 'end' event closes its
+    // window normally (it finished playing on its own, no barge-in), a later
+    // barge-in that happens to still name that same id (a race between the
+    // aggregated bargein envelope and this utterance's own natural
+    // completion) must not reach back and flip an already-finished
+    // utterance's bookkeeping.
+    it('is a no-op for an utterance whose window already closed via a natural end event', () => {
+      const { queue, sources } = buildQueue();
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+      queue.handleEvent({ kind: 'end', utteranceId: 'u1' });
+
+      queue.flush(['u1']);
+
+      expect(sources[0].stop).not.toHaveBeenCalled();
+    });
+  });
+
   describe('first-chunk timing (issue #10)', () => {
     // Catches the mixing-clock guard this measurement exists to satisfy: both the
     // "received" and "audible" instants must come from the same local clock

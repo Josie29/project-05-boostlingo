@@ -116,6 +116,26 @@ describe('CascadeSessionController', () => {
     vi.restoreAllMocks();
   });
 
+  // Catches the echo-cancellation regression this issue is about: without
+  // explicit constraints, a browser's getUserMedia default could omit echo
+  // cancellation entirely on some platforms, letting TTS output re-enter the
+  // mic and self-trigger a spurious barge-in.
+  it('requests the mic with explicit echo-cancellation constraints', async () => {
+    const ws = fakeWebSocket();
+    const getUserMedia = vi.fn(async () => fakeStream([fakeTrack()]));
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)), getUserMedia });
+    const controller = new CascadeSessionController(deps);
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  });
+
   it('reaches "connected" on a full happy-path handshake', async () => {
     const ws = fakeWebSocket();
     const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
@@ -630,5 +650,140 @@ describe('CascadeSessionController TTS audio framing (issue #7)', () => {
 
     expect(events.filter((event) => (event as { kind: string }).kind === 'chunk')).toEqual([]);
     expect(warnSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe('CascadeSessionController barge-in (issue #11)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Catches the core plumbing bug this issue is about: if a bargein envelope
+  // never reached audio subscribers, `AudioPlaybackQueue` would have no way
+  // to know a barge-in happened at all, and superseded audio would keep
+  // playing.
+  it('emits a bargein CascadeAudioEvent to audio subscribers when the envelope names superseded ids', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToAudio((event) => events.push(event));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'bargein',
+        payload: { supersededUtteranceIds: ['utt-1-target', 'utt-2-target'], serverTimeMs: 1_000 },
+      }),
+    });
+
+    expect(events).toEqual([
+      { kind: 'bargein', supersededUtteranceIds: ['utt-1-target', 'utt-2-target'] },
+    ]);
+  });
+
+  // Catches the known benign race the backend flags explicitly: a barged-in
+  // utterance's tts.audio.end may never arrive at all, since synthesis was
+  // aborted mid-stream. Without closing the window on bargein itself, every
+  // future binary frame (belonging to whatever utterance starts next) would
+  // keep being silently misattributed to this now-superseded id forever.
+  it('closes the currently-open audio window when its utteranceId is superseded, so later frames are dropped rather than misattributed', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToAudio((event) => events.push(event));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'tts.audio.start',
+        payload: { utteranceId: 'utt-1-target', sampleRateHz: 24000, encoding: 'pcm16', channels: 1 },
+      }),
+    });
+    // No tts.audio.end for utt-1-target — it never arrives, per the known race.
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'bargein',
+        payload: { supersededUtteranceIds: ['utt-1-target'], serverTimeMs: 1_000 },
+      }),
+    });
+    ws.onmessage?.({ data: new ArrayBuffer(4) }); // a late frame, arriving after the barge-in
+
+    const chunkEvents = events.filter((event) => (event as { kind: string }).kind === 'chunk');
+    expect(chunkEvents).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledOnce();
+  });
+
+  // Catches an over-eager-close bug: a bargein naming ids unrelated to
+  // whatever audio window is currently open must not close that unrelated
+  // window — only the utterance actually named as superseded should be
+  // affected.
+  it('leaves an open audio window alone when the bargein does not name its utteranceId', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToAudio((event) => events.push(event));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'tts.audio.start',
+        payload: { utteranceId: 'utt-1-target', sampleRateHz: 24000, encoding: 'pcm16', channels: 1 },
+      }),
+    });
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'bargein',
+        payload: { supersededUtteranceIds: ['some-other-utterance'], serverTimeMs: 1_000 },
+      }),
+    });
+    const chunk = new ArrayBuffer(4);
+    ws.onmessage?.({ data: chunk }); // still inside utt-1-target's window
+
+    const chunkEvents = events.filter((event) => (event as { kind: string }).kind === 'chunk');
+    expect(chunkEvents).toEqual([{ kind: 'chunk', utteranceId: 'utt-1-target', data: chunk }]);
+  });
+
+  // Catches the bug the backend's contract explicitly calls out: a bargein
+  // envelope is only ever sent with a non-empty supersededUtteranceIds, but
+  // defensively, an empty (or malformed) one must not fan out a bogus
+  // "nothing superseded" event that would confuse the playback queue.
+  it('does not emit a bargein event when supersededUtteranceIds is empty', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToAudio((event) => events.push(event));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({ v: 1, type: 'bargein', payload: { supersededUtteranceIds: [], serverTimeMs: 1_000 } }),
+    });
+
+    expect(events).toEqual([]);
   });
 });

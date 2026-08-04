@@ -1,4 +1,5 @@
 import { createRealtimeSession, type LanguagePair, type RealtimeSessionInfo } from '../api';
+import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
 import {
   INITIAL_REALTIME_SESSION_STATE,
   type RealtimeSessionState,
@@ -184,7 +185,7 @@ export class RealtimeSessionController {
     this.setState('requesting-mic');
 
     try {
-      const localStream = await this.deps.getUserMedia({ audio: true });
+      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
       if (myGeneration !== this.generation) {
         // stop() ran while the mic prompt was pending; discard the now-unwanted stream.
         for (const track of localStream.getTracks()) track.stop();

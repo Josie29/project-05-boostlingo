@@ -61,6 +61,21 @@ export const CascadeMessageType = {
    * this envelope type.
    */
   LatencyMark: 'latency.mark',
+  /**
+   * Server to client (issue #11): one utterance's target-lane transcript was
+   * cut short by a barge-in — sent once per superseded utterance, before the
+   * aggregated {@link Bargein} envelope below. See
+   * {@link CascadeTranscriptTruncatedPayload}.
+   */
+  TranscriptTruncated: 'transcript.truncated',
+  /**
+   * Server to client (issue #11): one aggregated barge-in event naming every
+   * target-lane utteranceId just superseded by the caller starting to speak
+   * again. Only sent when at least one utterance was actually superseded —
+   * a speech-onset with nothing in flight produces neither this nor
+   * {@link TranscriptTruncated}. See {@link CascadeBargeInPayload}.
+   */
+  Bargein: 'bargein',
 } as const;
 
 /** Payload the server echoes on `session.ready`, matching `CascadeSessionReadyPayload`. */
@@ -106,4 +121,26 @@ export interface CascadeTtsAudioStartPayload {
 /** Payload the server sends on `tts.audio.end`, matching `CascadeTtsAudioEndPayload`. */
 export interface CascadeTtsAudioEndPayload {
   utteranceId: string;
+}
+
+/**
+ * Payload the server sends on `transcript.truncated` (issue #11), matching
+ * `CascadeTranscriptTruncatedPayload` (`backend/CascadeAudioSession.cs`).
+ * `utteranceId` is the *target*-lane id — the same id space
+ * `tts.audio.start`/`tts.audio.end` use, not the source-lane id
+ * `transcript.partial`/`.final` for the *source* lane would use.
+ */
+export interface CascadeTranscriptTruncatedPayload {
+  utteranceId: string;
+}
+
+/**
+ * Payload the server sends on `bargein` (issue #11), matching
+ * `CascadeBargeInPayload` (`backend/CascadeAudioSession.cs`).
+ * `supersededUtteranceIds` are all target-lane ids, the same id space
+ * `tts.audio.start`/`tts.audio.end` use.
+ */
+export interface CascadeBargeInPayload {
+  supersededUtteranceIds: string[];
+  serverTimeMs: number;
 }

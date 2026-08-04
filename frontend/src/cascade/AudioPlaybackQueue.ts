@@ -67,6 +67,17 @@ export class AudioPlaybackQueue {
   private readonly firstChunkListeners = new Set<FirstChunkTimingListener>();
   /** Set on `'start'` to the utteranceId whose *next* chunk (its first) should report {@link FirstChunkTiming}; cleared once that report fires, so later chunks of the same utterance don't re-report. */
   private pendingFirstChunkUtteranceId: string | null = null;
+  /**
+   * utteranceId of whatever audio window is currently open — set on
+   * `'start'`, cleared on `'end'` or a successful {@link flush} — used by
+   * {@link flush} (issue #11) to decide whether a barge-in actually affects
+   * anything this queue has scheduled. Per the backend's framing guarantee
+   * (issue #7), TTS audio for different utterances is never interleaved, so
+   * at most one utterance's chunks are ever active at once; tracking just
+   * this single id — rather than a per-source map — is enough to know
+   * whether a barge-in's superseded ids match what's actually playing.
+   */
+  private currentUtteranceId: string | null = null;
   /** `deps.now()` reading and AudioContext `currentTime` reading taken together when the current AudioContext was created — the anchor {@link enqueueChunk} uses to translate an AudioContext-clock schedule time into an equivalent local-clock (`deps.now()`) instant, since both clocks advance in lockstep once anchored (both track real elapsed time from that shared instant). */
   private contextAnchorNowMs = 0;
   private contextAnchorTime = 0;
@@ -83,21 +94,73 @@ export class AudioPlaybackQueue {
    * boundary shouldn't introduce a gap (or worse, a jump backward) if the
    * previous utterance's audio is still scheduled to play out, and the
    * `max()` in {@link enqueueChunk} already handles the "queue ran dry" case
-   * on its own. `'end'` is a no-op: the chunks already scheduled keep
-   * playing on their own schedule regardless.
+   * on its own. `'end'` clears which utterance is "currently open" (so a
+   * later barge-in naming this same id is a no-op — it finished normally,
+   * nothing to flush) but is otherwise a no-op: the chunks already scheduled
+   * keep playing on their own schedule regardless. `'bargein'` (issue #11)
+   * delegates to {@link flush}.
    */
   handleEvent(event: CascadeAudioEvent): void {
     switch (event.kind) {
       case 'start':
         this.currentSampleRateHz = event.sampleRateHz;
         this.pendingFirstChunkUtteranceId = event.utteranceId;
+        this.currentUtteranceId = event.utteranceId;
         break;
       case 'chunk':
         this.enqueueChunk(event.data, event.utteranceId);
         break;
       case 'end':
+        if (this.currentUtteranceId === event.utteranceId) {
+          this.currentUtteranceId = null;
+        }
+        break;
+      case 'bargein':
+        this.flush(event.supersededUtteranceIds);
         break;
     }
+  }
+
+  /**
+   * Interrupts playback for a barge-in (issue #11): if the utterance
+   * currently occupying the scheduling cursor is among
+   * `supersededUtteranceIds`, stops and discards every scheduled-but-unfinished
+   * source for it and resets the cursor to "now," so the very next enqueued
+   * chunk — typically the utterance whose speech onset triggered this
+   * barge-in — starts audibly immediately rather than waiting out whatever
+   * was left of the flushed utterance's runtime. A no-op if nothing this
+   * queue has scheduled belongs to a superseded id (e.g. the barge-in only
+   * dropped queued-but-unstarted phrases that were never sent to this queue
+   * in the first place, since the backend never called the TTS provider for
+   * them).
+   *
+   * Unlike {@link stop}, the AudioContext itself is left open — a barge-in
+   * is mid-session, not a session teardown — so the next utterance's audio
+   * can be scheduled without paying to reopen a fresh context.
+   */
+  flush(supersededUtteranceIds: readonly string[]): void {
+    if (this.currentUtteranceId === null || !supersededUtteranceIds.includes(this.currentUtteranceId)) {
+      return;
+    }
+
+    for (const source of this.activeSources) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // Already finished/stopped on its own; nothing further to do.
+      }
+      source.disconnect();
+    }
+    this.activeSources.clear();
+
+    if (this.audioContext) {
+      this.nextStartTime = this.audioContext.currentTime;
+    }
+    if (this.pendingFirstChunkUtteranceId === this.currentUtteranceId) {
+      this.pendingFirstChunkUtteranceId = null;
+    }
+    this.currentUtteranceId = null;
   }
 
   /**
@@ -180,6 +243,7 @@ export class AudioPlaybackQueue {
     this.activeSources.clear();
     this.nextStartTime = 0;
     this.pendingFirstChunkUtteranceId = null;
+    this.currentUtteranceId = null;
 
     if (this.audioContext) {
       await this.audioContext.close();

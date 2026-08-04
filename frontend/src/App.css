@@ -307,6 +307,20 @@
   padding-left: var(--space-2);
 }
 
+/* Issue #11: a barge-in cut this utterance short before it reached a natural
+   transcript.final/.done — visually distinct from both "still in progress"
+   (dashed accent border above) and a normal settled entry (no border). */
+.transcript-panel__entry[data-truncated='true'] {
+  border-left: 2px dashed var(--color-danger);
+  padding-left: var(--space-2);
+}
+
+.transcript-panel__truncated-marker {
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
 .latency-panel {
   display: flex;
   flex-direction: column;

@@ -53,4 +53,20 @@ describe('TranscriptPanel', () => {
 
     expect(screen.getAllByText('Nothing yet.')).toHaveLength(2);
   });
+
+  // Catches the issue #11 UX bug this exists for: a barge-in-truncated entry
+  // must render visibly distinct from both an in-progress entry and a normally
+  // finalized one, so a listener can tell "cut off" apart from "done talking."
+  it('marks a truncated entry distinctly from both in-progress and normally-finalized entries', () => {
+    const entries: TranscriptEntry[] = [
+      { id: 'a', lane: 'target', text: 'Hel', final: true, truncated: true },
+      { id: 'b', lane: 'target', text: 'Done talking', final: true },
+    ];
+
+    render(<TranscriptPanel entries={entries} />);
+
+    expect(screen.getByText('Hel')).toHaveAttribute('data-truncated', 'true');
+    expect(screen.getByText('Done talking')).toHaveAttribute('data-truncated', 'false');
+    expect(screen.getByLabelText('cut off by barge-in')).toBeInTheDocument();
+  });
 });

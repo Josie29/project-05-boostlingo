@@ -83,4 +83,40 @@ describe('mapCascadeEventToTranscriptUpdate', () => {
       }),
     ).toBeNull();
   });
+
+  describe('transcript.truncated (issue #11)', () => {
+    // Catches the core mapping bug this issue is about: without this, a barge-in
+    // would never reach the transcript panel at all, leaving a superseded
+    // utterance's entry stuck showing "in progress" forever instead of "cut off."
+    it('maps a transcript.truncated envelope to a truncated, final, target-lane update', () => {
+      const update = mapCascadeEventToTranscriptUpdate({
+        v: 1,
+        type: 'transcript.truncated',
+        payload: { utteranceId: 'utt-1-target' },
+      });
+
+      expect(update).toEqual({ utteranceId: 'utt-1-target', lane: 'target', text: '', final: true, truncated: true });
+    });
+
+    // Catches a lane-mixup bug: the backend contract is explicit that
+    // transcript.truncated's utteranceId is always the target-lane id (the same
+    // id tts.audio.start/.end use) — there is no source-lane equivalent, so this
+    // must never be inferred from the payload (which carries no lane at all).
+    it('always uses the target lane, since the payload carries no lane of its own', () => {
+      const update = mapCascadeEventToTranscriptUpdate({
+        v: 1,
+        type: 'transcript.truncated',
+        payload: { utteranceId: 'utt-2-target' },
+      });
+
+      expect(update?.lane).toBe('target');
+    });
+
+    // Catches a crash bug: a malformed transcript.truncated payload (missing the
+    // one field it has) must be dropped instead of throwing.
+    it('returns null for a malformed transcript.truncated payload', () => {
+      expect(mapCascadeEventToTranscriptUpdate({ v: 1, type: 'transcript.truncated', payload: {} })).toBeNull();
+      expect(mapCascadeEventToTranscriptUpdate({ v: 1, type: 'transcript.truncated' })).toBeNull();
+    });
+  });
 });

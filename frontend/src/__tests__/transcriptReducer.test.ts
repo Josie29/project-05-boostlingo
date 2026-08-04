@@ -95,4 +95,76 @@ describe('transcriptReducer', () => {
 
     expect(previous.entries).toEqual(previousEntriesSnapshot);
   });
+
+  describe('truncated updates (issue #11)', () => {
+    // Catches the core bug this issue is about: a barge-in cutting off an
+    // in-progress utterance must leave its already-accumulated text on screen
+    // (not blank it out) while finalizing it and marking it "cut off" — a
+    // listener re-reading the transcript later needs to see what was actually
+    // said before the interruption, not an empty entry.
+    it('finalizes an in-progress entry and marks it truncated, preserving its accumulated text', () => {
+      let state = transcriptReducer(INITIAL_TRANSCRIPT_STATE, {
+        utteranceId: 'a',
+        lane: 'target',
+        text: 'Hel',
+        final: false,
+      });
+      state = transcriptReducer(state, { utteranceId: 'a', lane: 'target', text: '', final: true, truncated: true });
+
+      expect(state.entries).toEqual([{ id: 'a', lane: 'target', text: 'Hel', final: true, truncated: true }]);
+    });
+
+    // Catches a text-clobbering bug: since transcript.truncated carries no text of
+    // its own, the reducer must ignore whatever's on the update's `text` field
+    // entirely (not treat it as a final replacement, which would blank the entry).
+    it('ignores the truncated update\'s own text field even if non-empty', () => {
+      let state = transcriptReducer(INITIAL_TRANSCRIPT_STATE, {
+        utteranceId: 'a',
+        lane: 'target',
+        text: 'Hello the',
+        final: false,
+      });
+      state = transcriptReducer(state, {
+        utteranceId: 'a',
+        lane: 'target',
+        text: 'this should be ignored',
+        final: true,
+        truncated: true,
+      });
+
+      expect(state.entries[0].text).toBe('Hello the');
+    });
+
+    // Catches a crash/edge-case bug: a truncation for an utterance this reducer
+    // never saw any prior update for (e.g. one superseded before its first
+    // partial ever arrived) must still produce a valid, empty-but-final entry
+    // rather than throwing or being silently dropped.
+    it('creates an empty, final, truncated entry when no prior update exists for the utterance', () => {
+      const state = transcriptReducer(INITIAL_TRANSCRIPT_STATE, {
+        utteranceId: 'a',
+        lane: 'target',
+        text: 'ignored',
+        final: true,
+        truncated: true,
+      });
+
+      expect(state.entries).toEqual([{ id: 'a', lane: 'target', text: '', final: true, truncated: true }]);
+    });
+
+    // Catches a bug where a truncation racing an utterance's own natural
+    // completion reopens or corrupts already-settled text — mirrors the
+    // existing "ignores an update for an already-finalized utterance" guard
+    // above, but specifically for the truncated path.
+    it('ignores a truncation for an utterance that already finalized naturally', () => {
+      let state = transcriptReducer(INITIAL_TRANSCRIPT_STATE, {
+        utteranceId: 'a',
+        lane: 'target',
+        text: 'Hello',
+        final: true,
+      });
+      state = transcriptReducer(state, { utteranceId: 'a', lane: 'target', text: '', final: true, truncated: true });
+
+      expect(state.entries).toEqual([{ id: 'a', lane: 'target', text: 'Hello', final: true }]);
+    });
+  });
 });

@@ -22,6 +22,11 @@ const TARGET_SAMPLE_RATE_HZ = 16_000;
  * AudioContext nor AudioWorkletNode. `CascadeSessionController`'s tests
  * inject a fake `CascadeAudioCapture` instead, so the transport/handshake
  * logic is fully covered without needing a real browser.
+ *
+ * This class only *processes* whatever `MediaStream` it's handed — the
+ * `getUserMedia` call that produces that stream (and its echo-cancellation
+ * constraints, issue #11) lives one level up, in
+ * `CascadeSessionController.start()` (see `../audio/micConstraints.ts`).
  */
 export class MicPcmCapture implements CascadeAudioCapture {
   private audioContext: AudioContext | null = null;

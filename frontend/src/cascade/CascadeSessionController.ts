@@ -1,10 +1,12 @@
 import type { CascadeAudioCapture } from './CascadeAudioCapture';
 import { MicPcmCapture } from './MicPcmCapture';
 import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
+import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
 import {
   CASCADE_ENVELOPE_VERSION,
   CascadeMessageType,
   INITIAL_CASCADE_SESSION_STATE,
+  type CascadeBargeInPayload,
   type CascadeErrorPayload,
   type CascadeSessionState,
   type CascadeSessionStatus,
@@ -61,7 +63,15 @@ type EventListener = (event: unknown) => void;
 export type CascadeAudioEvent =
   | { kind: 'start'; utteranceId: string; sampleRateHz: number }
   | { kind: 'chunk'; utteranceId: string; data: ArrayBuffer }
-  | { kind: 'end'; utteranceId: string };
+  | { kind: 'end'; utteranceId: string }
+  /**
+   * A `bargein` envelope (issue #11): every target-lane utteranceId the
+   * backend just superseded. Emitted only when the aggregated `bargein`
+   * envelope actually names at least one id — see
+   * {@link CascadeSessionController}'s handling of
+   * `CascadeMessageType.Bargein`.
+   */
+  | { kind: 'bargein'; supersededUtteranceIds: string[] };
 /** Receives one {@link CascadeAudioEvent} — the TTS playback queue's only input. */
 type AudioEventListener = (event: CascadeAudioEvent) => void;
 
@@ -180,7 +190,7 @@ export class CascadeSessionController {
     this.setState('requesting-mic');
 
     try {
-      const localStream = await this.deps.getUserMedia({ audio: true });
+      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
       if (myGeneration !== this.generation) {
         // stop() ran while the mic prompt was pending; discard the now-unwanted stream.
         for (const track of localStream.getTracks()) track.stop();
@@ -306,6 +316,26 @@ export class CascadeSessionController {
               this.currentAudioUtteranceId = null;
             }
             for (const listener of this.audioListeners) listener({ kind: 'end', utteranceId: payload.utteranceId });
+          }
+        } else if (envelope.type === CascadeMessageType.Bargein) {
+          const payload = envelope.payload as CascadeBargeInPayload | undefined;
+          const supersededUtteranceIds = Array.isArray(payload?.supersededUtteranceIds)
+            ? payload.supersededUtteranceIds.filter((id): id is string => typeof id === 'string')
+            : [];
+          if (supersededUtteranceIds.length > 0) {
+            if (this.currentAudioUtteranceId && supersededUtteranceIds.includes(this.currentAudioUtteranceId)) {
+              // Closes the window now rather than waiting for tts.audio.end —
+              // the known benign race (issue #11) is that a barged-in
+              // utterance's tts.audio.end may never arrive at all, since the
+              // backend aborted mid-synthesis. Leaving the window open would
+              // misattribute every future binary frame (belonging to
+              // whatever utterance starts next) to this now-superseded id
+              // forever.
+              this.currentAudioUtteranceId = null;
+            }
+            for (const listener of this.audioListeners) {
+              listener({ kind: 'bargein', supersededUtteranceIds });
+            }
           }
         }
       };

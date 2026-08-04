@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { Fragment, useEffect, useRef } from 'react';
 import type { TranscriptEntry, TranscriptLane } from '../transcript/types';
 
 const LANE_LABEL: Record<TranscriptLane, string> = {
@@ -54,13 +54,24 @@ function TranscriptColumn({ lane, entries }: { lane: TranscriptLane; entries: Tr
           <p className="transcript-panel__empty">Nothing yet.</p>
         ) : (
           entries.map((entry) => (
-            <p
-              key={entry.id}
-              className="transcript-panel__entry"
-              data-final={entry.final}
-            >
-              {entry.text}
-            </p>
+            // The truncation marker renders as a sibling of the <p>, not a child of
+            // it, so the <p>'s own text content stays exactly `entry.text` — anything
+            // reading its rendered text (e.g. `getByText`) shouldn't have to account
+            // for trailing UI chrome that was never part of what was actually said.
+            <Fragment key={entry.id}>
+              <p
+                className="transcript-panel__entry"
+                data-final={entry.final}
+                data-truncated={entry.truncated ?? false}
+              >
+                {entry.text}
+              </p>
+              {entry.truncated && (
+                <span className="transcript-panel__truncated-marker" aria-label="cut off by barge-in">
+                  (cut off)
+                </span>
+              )}
+            </Fragment>
           ))
         )}
       </div>

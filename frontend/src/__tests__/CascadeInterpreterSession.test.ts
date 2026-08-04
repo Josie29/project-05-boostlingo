@@ -228,4 +228,33 @@ describe('CascadeInterpreterSession', () => {
 
     expect(stopSpy).toHaveBeenCalledOnce();
   });
+
+  // Catches the end-to-end wiring bug issue #11 is about: even with the
+  // controller correctly parsing a bargein envelope and the queue correctly
+  // implementing flush() in isolation, the two are only actually connected
+  // through `subscribeToAudio` in this adapter's constructor — a wiring
+  // mistake there would leave barge-in flushing silently dead in production
+  // despite every unit test elsewhere passing.
+  it('flushes the playback queue for the superseded ids when a bargein envelope arrives', async () => {
+    const ws = fakeWebSocket();
+    const controller = new CascadeSessionController(buildControllerDeps({ createWebSocket: () => toWebSocket(ws) }));
+    const playbackQueue = new AudioPlaybackQueue({ createAudioContext: fakeAudioContext });
+    const flushSpy = vi.spyOn(playbackQueue, 'flush');
+    const session = new CascadeInterpreterSession(controller, playbackQueue);
+
+    const startPromise = session.start({ sourceLang: 'en', targetLang: 'es' });
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'bargein',
+        payload: { supersededUtteranceIds: ['utt-1-target'], serverTimeMs: 1_000 },
+      }),
+    });
+
+    expect(flushSpy).toHaveBeenCalledWith(['utt-1-target']);
+  });
 });
