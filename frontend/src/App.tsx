@@ -1,5 +1,6 @@
 import { BackendStatus } from './components/BackendStatus';
 import { RealtimeSessionPanel } from './components/RealtimeSessionPanel';
+import { CascadeSessionPanel } from './components/CascadeSessionPanel';
 import './App.css';
 
 /**
@@ -20,6 +21,7 @@ function App() {
       <main className="app-shell__main">
         <BackendStatus />
         <RealtimeSessionPanel />
+        <CascadeSessionPanel />
         <p className="app-shell__placeholder">Latency instrumentation lands here.</p>
       </main>
     </div>
