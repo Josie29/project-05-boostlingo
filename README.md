@@ -28,8 +28,63 @@ in the UI.
 
 ## Status
 
-Scaffolding. Stack and scope TBD.
+MVP-testable. Both modes (Realtime and Cascade) are wired end to end.
 
 ## Setup
 
-TBD.
+### Prerequisites
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- [Node.js](https://nodejs.org/) 20+
+- An OpenAI API key with access to the Realtime API (`gpt-realtime`) and
+  standard chat/audio endpoints — both modes and the full cascade
+  (STT/MT/TTS) run on this one key.
+
+### Backend
+
+```bash
+cd backend
+cp ../.env.example ../.env   # if you haven't already; fill in OPENAI_API_KEY
+dotnet run
+```
+
+Serves on `http://localhost:5170`. Confirm it's up:
+
+```bash
+curl http://localhost:5170/healthz
+```
+
+### Frontend
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Serves on `http://localhost:5173` and proxies `/api`, `/healthz`, and `/ws`
+to the backend (see `frontend/vite.config.ts`) — no CORS setup or hardcoded
+base URL needed. Open `http://localhost:5173` with the backend already
+running.
+
+### Trying it out
+
+1. Pick a language pair (English ↔ Spanish is the tested minimum).
+2. Choose **Realtime** or **Cascade** mode.
+3. Start the session, grant microphone permission, and speak.
+4. Watch the live source/target transcript and the per-stage latency panel
+   as you go; switch modes between sessions to compare them.
+
+### Tests
+
+```bash
+# Backend
+cd backend
+dotnet test
+
+# Frontend
+cd frontend
+npm test
+```
