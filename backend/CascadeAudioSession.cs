@@ -100,6 +100,19 @@ public static class CascadeMessageTypes
 
     /// <summary>Server to client: the settled transcript text for one utterance.</summary>
     public const string TranscriptFinal = "transcript.final";
+
+    /// <summary>
+    /// Server to client: announces that one or more binary PCM audio frames for the
+    /// named utterance are about to follow, and how to interpret them. See
+    /// <see cref="CascadeTtsAudioStartPayload"/>.
+    /// </summary>
+    public const string TtsAudioStart = "tts.audio.start";
+
+    /// <summary>
+    /// Server to client: no more binary audio frames are coming for the utterance
+    /// named in the matching <see cref="TtsAudioStart"/>. See <see cref="CascadeTtsAudioEndPayload"/>.
+    /// </summary>
+    public const string TtsAudioEnd = "tts.audio.end";
 }
 
 /// <summary>
@@ -165,6 +178,28 @@ public sealed record CascadeErrorPayload(string Message);
 /// <param name="TimestampMs">Milliseconds since the session's audio stream started.</param>
 public sealed record CascadeTranscriptPayload(string UtteranceId, string Lane, string Text, long TimestampMs);
 
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.TtsAudioStart"/>. The client should
+/// begin buffering the raw binary WebSocket frames that follow as PCM (Pulse Code
+/// Modulation) audio for <paramref name="UtteranceId"/>, using this format, until the
+/// matching <see cref="CascadeMessageTypes.TtsAudioEnd"/> arrives.
+/// </summary>
+/// <param name="UtteranceId">The target-lane utterance id (see <see cref="CascadeTranscriptPayload.UtteranceId"/>
+/// on the <see cref="CascadeTranscriptLanes.Target"/> lane) this audio is the spoken
+/// rendering of.</param>
+/// <param name="SampleRateHz">Samples per second the binary frames are encoded at; see <see cref="TtsAudioFormat"/>.</param>
+/// <param name="Encoding">Sample encoding of the binary frames; see <see cref="TtsAudioFormat"/>.</param>
+/// <param name="Channels">Audio channel count of the binary frames; see <see cref="TtsAudioFormat"/>.</param>
+public sealed record CascadeTtsAudioStartPayload(string UtteranceId, int SampleRateHz, string Encoding, int Channels);
+
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.TtsAudioEnd"/>: no more binary audio
+/// frames are coming for this utterance, so the client's playback queue can mark it
+/// complete once whatever it already buffered finishes playing.
+/// </summary>
+/// <param name="UtteranceId">The same id the matching <see cref="CascadeMessageTypes.TtsAudioStart"/> named.</param>
+public sealed record CascadeTtsAudioEndPayload(string UtteranceId);
+
 /// <summary>The negotiated configuration for one cascade session, taken from <see cref="CascadeSessionStartPayload"/>.</summary>
 /// <param name="SourceLang">Language tag the speaker is using.</param>
 /// <param name="TargetLang">Language tag to interpret into.</param>
@@ -185,6 +220,19 @@ public interface ICascadeEventSink
     /// <param name="cancellationToken">Propagates send cancellation.</param>
     /// <returns>A task that completes once the frame has been written to the socket.</returns>
     Task SendEventAsync(string type, object? payload, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Sends raw bytes to the client as a single binary WebSocket frame - the downstream
+    /// half of text-to-speech (#7): one call per <see cref="TtsAudioChunk"/>, bracketed
+    /// by a <see cref="CascadeMessageTypes.TtsAudioStart"/>/<see cref="CascadeMessageTypes.TtsAudioEnd"/>
+    /// pair sent via <see cref="SendEventAsync"/>. Shares the same underlying send lock
+    /// as <see cref="SendEventAsync"/> so a control/transcript event from another task
+    /// can never land in the middle of the bytes that make up one binary frame.
+    /// </summary>
+    /// <param name="data">Raw audio bytes for this frame.</param>
+    /// <param name="cancellationToken">Propagates send cancellation.</param>
+    /// <returns>A task that completes once the frame has been written to the socket.</returns>
+    Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -540,6 +588,23 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
             if (socket.State == WebSocketState.Open)
             {
                 await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
+            }
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (socket.State == WebSocketState.Open)
+            {
+                await socket.SendAsync(data, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken);
             }
         }
         finally

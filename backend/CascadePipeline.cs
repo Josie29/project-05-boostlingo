@@ -10,8 +10,11 @@ using System.Threading.Channels;
 /// <see cref="CascadeTranscriptLanes.Source"/> lane. Every finalized source segment is
 /// then handed to <see cref="ITranslationProvider"/>, whose streamed token deltas
 /// become the same two event types on the <see cref="CascadeTranscriptLanes.Target"/>
-/// lane. Text-to-speech (#7) subscribes to the same translation chunks via
-/// <see cref="ITranslationObserver"/> rather than this class changing again.
+/// lane. Text-to-speech (#7, <see cref="TtsCascadeObserver"/>) subscribes to the same
+/// translation chunks via <see cref="ITranslationObserver"/> - it needed this class to
+/// grow two small, generic hooks (the target language on every <see cref="TranslationChunk"/>,
+/// and disposing observers that opt into <see cref="IAsyncDisposable"/>) but no
+/// TTS-specific logic of its own.
 /// </summary>
 /// <remarks>
 /// Registered as scoped (one instance per WebSocket connection, not a shared
@@ -127,7 +130,38 @@ public sealed class CascadePipeline(
             await _sttStream.DisposeAsync();
         }
 
+        await DisposeObserversAsync();
+
         _pumpCts?.Dispose();
+    }
+
+    /// <summary>
+    /// Disposes every registered <see cref="ITranslationObserver"/> that also
+    /// implements <see cref="IAsyncDisposable"/> - the seam <see cref="TtsCascadeObserver"/>
+    /// uses to drain its per-utterance synthesis pump and release its background task
+    /// before the session's socket closes. A generic check here (rather than a
+    /// TTS-specific call) keeps this class from needing to change again if a later
+    /// stage needs the same cleanup, matching this file's own goal of not changing for
+    /// #7.
+    /// </summary>
+    private async Task DisposeObserversAsync()
+    {
+        foreach (var observer in translationObservers)
+        {
+            if (observer is not IAsyncDisposable disposable)
+            {
+                continue;
+            }
+
+            try
+            {
+                await disposable.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Translation observer failed to dispose cleanly.");
+            }
+        }
     }
 
     /// <summary>
@@ -249,7 +283,9 @@ public sealed class CascadePipeline(
                     new CascadeTranscriptPayload(targetUtteranceId, CascadeTranscriptLanes.Target, token, ElapsedSessionMs()),
                     cancellationToken);
                 await NotifyTranslationObserversAsync(
-                    new TranslationChunk(segment.UtteranceId, targetUtteranceId, token, IsFinal: false), cancellationToken);
+                    new TranslationChunk(segment.UtteranceId, targetUtteranceId, token, IsFinal: false, _config.TargetLang),
+                    events,
+                    cancellationToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -268,16 +304,19 @@ public sealed class CascadePipeline(
             new CascadeTranscriptPayload(targetUtteranceId, CascadeTranscriptLanes.Target, finalText, ElapsedSessionMs()),
             cancellationToken);
         await NotifyTranslationObserversAsync(
-            new TranslationChunk(segment.UtteranceId, targetUtteranceId, finalText, IsFinal: true), cancellationToken);
+            new TranslationChunk(segment.UtteranceId, targetUtteranceId, finalText, IsFinal: true, _config.TargetLang),
+            events,
+            cancellationToken);
     }
 
-    private async Task NotifyTranslationObserversAsync(TranslationChunk chunk, CancellationToken cancellationToken)
+    private async Task NotifyTranslationObserversAsync(
+        TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken)
     {
         foreach (var observer in translationObservers)
         {
             try
             {
-                await observer.OnTranslationChunkAsync(chunk, cancellationToken);
+                await observer.OnTranslationChunkAsync(chunk, events, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

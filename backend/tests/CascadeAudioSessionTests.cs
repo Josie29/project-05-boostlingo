@@ -59,6 +59,36 @@ public class CascadeAudioSessionTests
     }
 
     /// <summary>
+    /// Confirms ICascadeEventSink.SendBinaryAsync (the seam TTS/#7 uses to push
+    /// synthesized audio) actually reaches the client as a binary WebSocket frame,
+    /// distinguishable from the text frames the same connection also carries - without
+    /// this, the frontend playback queue would have no audio to buffer at all.
+    /// </summary>
+    [Fact]
+    public async Task ServerPushedBinaryFrame_ReachesClient_AsBinaryMessage()
+    {
+        var audioBytes = new byte[] { 10, 20, 30, 40 };
+        var fakePipeline = new FakeCascadePipeline(onSessionStarted: events => events.SendBinaryAsync(audioBytes, CancellationToken.None));
+        using var factory = new CascadeTestFactory(fakePipeline);
+        using var socket = await ConnectAsync(factory.Server);
+
+        await SendTextAsync(socket, """{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"es"}}""");
+
+        var buffer = new byte[64];
+        var result = await socket.ReceiveAsync(buffer, TestTimeout());
+
+        Assert.Equal(WebSocketMessageType.Binary, result.MessageType);
+        Assert.Equal(audioBytes, buffer[..result.Count]);
+
+        // The session.ready text frame the transport always sends after
+        // session.start must still arrive intact after the binary push.
+        var envelope = await ReceiveEnvelopeAsync(socket);
+        Assert.Equal("session.ready", envelope.RootElement.GetProperty("type").GetString());
+
+        await CloseAsync(socket);
+    }
+
+    /// <summary>
     /// Confirms an unparseable control frame gets a JSON error event back instead of
     /// silently dropping the message or tearing down the whole connection.
     /// </summary>
@@ -168,7 +198,7 @@ public class CascadeAudioSessionTests
 /// Records every call the transport makes so tests can assert the pipeline seam is
 /// actually exercised, without needing a real STT/MT/TTS implementation.
 /// </summary>
-file sealed class FakeCascadePipeline : ICascadePipeline
+file sealed class FakeCascadePipeline(Func<ICascadeEventSink, Task>? onSessionStarted = null) : ICascadePipeline
 {
     public Channel<byte[]> AudioChunks { get; } = Channel.CreateUnbounded<byte[]>();
 
@@ -178,10 +208,13 @@ file sealed class FakeCascadePipeline : ICascadePipeline
 
     public TaskCompletionSource EndedSignal { get; } = new();
 
-    public Task OnSessionStartedAsync(CascadeSessionConfig config, ICascadeEventSink events, CancellationToken cancellationToken)
+    public async Task OnSessionStartedAsync(CascadeSessionConfig config, ICascadeEventSink events, CancellationToken cancellationToken)
     {
         StartedConfig = config;
-        return Task.CompletedTask;
+        if (onSessionStarted is not null)
+        {
+            await onSessionStarted(events);
+        }
     }
 
     public Task OnAudioChunkAsync(ReadOnlyMemory<byte> pcm, ICascadeEventSink events, CancellationToken cancellationToken)

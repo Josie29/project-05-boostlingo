@@ -284,6 +284,55 @@ public class CascadePipelineTests
         AssertTargetPayload(finalB, CascadeMessageTypes.TranscriptFinal, "utt-b-target", "Bien");
     }
 
+    /// <summary>
+    /// Confirms every translation chunk carries the session's negotiated target
+    /// language - the field TTS/#7 relies on to know what language it is
+    /// synthesizing without needing its own copy of the session config.
+    /// </summary>
+    [Fact]
+    public async Task FinalSourceSegment_NotifiesObservers_WithSessionTargetLang()
+    {
+        var stream = new FakeSttStream();
+        var observer = new FakeTranslationObserver();
+        var translationProvider = new FakeTranslationProvider(_ => Tokens("Hola"));
+        var pipeline = CreatePipeline(new FakeSttProvider(stream), translationProvider, [observer]);
+        var sink = new FakeEventSink();
+        var events = new LaneSplitEventReader(sink);
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        stream.Emit(new SttSegment("utt-1", "Hello", IsFinal: true, TimestampMs: 10));
+
+        // Draining through the final target-lane envelope guarantees the pipeline's
+        // synchronous continuation - which notifies observers for that same token
+        // immediately after sending it - has already run (see the sibling test above
+        // for the same pattern).
+        await events.Target.Reader.ReadAsync(TestTimeout());
+        await events.Target.Reader.ReadAsync(TestTimeout());
+
+        Assert.NotEmpty(observer.Chunks);
+        Assert.All(observer.Chunks, chunk => Assert.Equal("es", chunk.TargetLang));
+    }
+
+    /// <summary>
+    /// Confirms a translation observer that also implements IAsyncDisposable (the
+    /// shape TTS/#7's TtsCascadeObserver takes) is disposed exactly once when the
+    /// session ends - without this, TTS could never drain its per-utterance
+    /// synthesis pump or release its background task before the socket closes.
+    /// </summary>
+    [Fact]
+    public async Task SessionEnded_DisposesAsyncDisposableTranslationObserver_ExactlyOnce()
+    {
+        var stream = new FakeSttStream();
+        var observer = new FakeAsyncDisposableTranslationObserver();
+        var pipeline = CreatePipeline(new FakeSttProvider(stream), translationObservers: [observer]);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
+
+        Assert.Equal(1, observer.DisposeCount);
+    }
+
     private static async IAsyncEnumerable<string> Tokens(params string[] tokens)
     {
         foreach (var token in tokens)
@@ -335,6 +384,11 @@ file sealed class FakeEventSink : ICascadeEventSink
     public Task SendEventAsync(string type, object? payload, CancellationToken cancellationToken)
     {
         Sent.Writer.TryWrite((type, payload));
+        return Task.CompletedTask;
+    }
+
+    public Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
         return Task.CompletedTask;
     }
 }
@@ -444,10 +498,30 @@ file sealed class FakeTranslationObserver : ITranslationObserver
 {
     public List<TranslationChunk> Chunks { get; } = [];
 
-    public Task OnTranslationChunkAsync(TranslationChunk chunk, CancellationToken cancellationToken)
+    public Task OnTranslationChunkAsync(TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken)
     {
         Chunks.Add(chunk);
         return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// An <see cref="ITranslationObserver"/> that also implements <see cref="IAsyncDisposable"/> -
+/// the shape <see cref="TtsCascadeObserver"/> (#7) takes - so tests can confirm
+/// <see cref="CascadePipeline"/> disposes it exactly once at session end, the generic
+/// seam that lets TTS drain its per-utterance synthesis pump before the socket closes.
+/// </summary>
+file sealed class FakeAsyncDisposableTranslationObserver : ITranslationObserver, IAsyncDisposable
+{
+    public int DisposeCount { get; private set; }
+
+    public Task OnTranslationChunkAsync(TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    public ValueTask DisposeAsync()
+    {
+        DisposeCount++;
+        return ValueTask.CompletedTask;
     }
 }
 

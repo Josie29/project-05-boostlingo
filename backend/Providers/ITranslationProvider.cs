@@ -52,7 +52,11 @@ public interface ITranslationProvider
 /// <paramref name="SourceUtteranceId"/> - see <c>CascadePipeline.TranslateSegmentAsync</c>).</param>
 /// <param name="Text">The token delta (partial) or full translated text (final).</param>
 /// <param name="IsFinal"><c>true</c> once the translation for this utterance is complete.</param>
-public sealed record TranslationChunk(string SourceUtteranceId, string TargetUtteranceId, string Text, bool IsFinal);
+/// <param name="TargetLang">Language tag the text is written in, e.g. <c>"es"</c> - the
+/// session's negotiated target language, carried on every chunk so a subscriber (TTS/#7)
+/// never needs its own copy of the session config to know what language it is
+/// synthesizing.</param>
+public sealed record TranslationChunk(string SourceUtteranceId, string TargetUtteranceId, string Text, bool IsFinal, string TargetLang);
 
 /// <summary>
 /// Lets a later cascade stage (text-to-speech in particular) observe every streamed
@@ -69,8 +73,11 @@ public interface ITranslationObserver
     /// sent to the client as a <c>transcript.*</c> event on the target lane.
     /// </summary>
     /// <param name="chunk">The chunk that was just produced.</param>
+    /// <param name="events">Sink for any events (or, for TTS/#7, binary audio frames)
+    /// the observer wants to push to the client. The same sink <see cref="CascadePipeline"/>
+    /// itself used to send the chunk's own <c>transcript.*</c> event.</param>
     /// <param name="cancellationToken">Propagates session cancellation.</param>
-    Task OnTranslationChunkAsync(TranslationChunk chunk, CancellationToken cancellationToken);
+    Task OnTranslationChunkAsync(TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken);
 }
 
 /// <summary>

@@ -24,11 +24,27 @@ builder.Services.AddHttpClient<ITranslationProvider, OpenAiTranslationProvider>(
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
-// The real cascade pipeline (STT and MT live; TTS lands behind the same
-// ICascadePipeline in #7). Scoped, not singleton: CascadePipeline holds per-session
-// mutable state (the open STT stream and the background tasks draining it and the
-// translation queue), and ASP.NET Core gives each WebSocket upgrade request its own DI
-// scope for the lifetime of the connection.
+// TTS (text-to-speech; #7) provider. Typed HttpClient, same pattern as
+// ITranslationProvider above - OPENAI_API_KEY is attached per-request inside
+// OpenAiTtsProvider and never exposed to callers of ITtsProvider.
+builder.Services.AddHttpClient<ITtsProvider, OpenAiTtsProvider>(client =>
+{
+    client.BaseAddress = new Uri("https://api.openai.com/v1/");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+// TTS cascade glue (#7): observes streamed translation chunks and turns them into
+// tts.audio.start/binary frames/tts.audio.end on the client. Scoped, not singleton -
+// it holds a per-session background synthesis pump (see TtsCascadeObserver's remarks)
+// and must be disposed with the rest of the session's scoped services when the
+// WebSocket connection's DI scope ends.
+builder.Services.AddScoped<ITranslationObserver, TtsCascadeObserver>();
+
+// The real cascade pipeline (STT, MT, and TTS all live behind ICascadePipeline).
+// Scoped, not singleton: CascadePipeline holds per-session mutable state (the open
+// STT stream and the background tasks draining it and the translation queue), and
+// ASP.NET Core gives each WebSocket upgrade request its own DI scope for the lifetime
+// of the connection.
 builder.Services.AddScoped<ICascadePipeline, CascadePipeline>();
 
 var app = builder.Build();
