@@ -10,7 +10,14 @@ import {
   type TranscriptUpdate,
 } from '../transcript/types';
 import { CascadeInterpreterSession } from './CascadeInterpreterSession';
-import { isLiveStatus, type InterpreterSession, type SessionMode, type SessionStatus } from './InterpreterSession';
+import {
+  isLiveStatus,
+  type InterpreterSession,
+  type SessionErrorKind,
+  type SessionMode,
+  type SessionNotice,
+  type SessionStatus,
+} from './InterpreterSession';
 import { RealtimeInterpreterSession } from './RealtimeInterpreterSession';
 
 /** Wraps the pure `transcriptReducer` with a `reset` action for "a fresh Start clears the previous conversation's transcript". */
@@ -39,6 +46,10 @@ export interface UseInterpreterSessionResult {
   status: SessionStatus;
   /** Human-readable failure reason, set only when `status` is `'error'`. */
   errorMessage: string | null;
+  /** See `SessionState.errorKind` (issue #12) — narrows *why* `status` is `'error'` for the mic-permission cases shared UI renders distinctly. `null` otherwise. */
+  errorKind: SessionErrorKind;
+  /** See `SessionState.reconnectable` (issue #12) — true when recovering means the Reconnect affordance (`reconnect()`, preserving transcript) rather than a plain `start()` retry. */
+  reconnectable: boolean;
   /** True while a mid-session mode switch is tearing the old transport down and bringing the new one up. */
   switching: boolean;
   /** Live source/target transcript entries for this conversation, preserved across mode switches. */
@@ -47,6 +58,8 @@ export interface UseInterpreterSessionResult {
   latencyReports: LatencyReport[];
   /** Session-wide running latency averages, recomputed from every report accumulated so far (issue #10). */
   latencyAverages: LatencySessionAverages;
+  /** The latest non-fatal, dismissible per-stage notice (issue #12), or `null` once dismissed/superseded/cleared by a fresh `start()`/`reconnect()`/mode switch. */
+  notice: SessionNotice | null;
   /**
    * Selects the given transport. Pre-session (or once a session has settled
    * into `'error'`), this just changes which transport the next `start()`
@@ -60,6 +73,17 @@ export interface UseInterpreterSessionResult {
   start: () => void;
   /** Tears the active transport down cleanly (safe to call from any state). */
   stop: () => void;
+  /**
+   * The Reconnect affordance (issue #12): tears the active transport down and
+   * starts a fresh one with the same language pair, *without* clearing
+   * transcript/latency history — unlike `start()`, which is always a
+   * deliberate fresh conversation. Meant to be called only while
+   * `reconnectable` is true (a dead mid-session transport), mirroring how
+   * `setMode`'s mid-session branch stops-then-starts without resetting.
+   */
+  reconnect: () => void;
+  /** Dismisses the current `notice`, if any. */
+  dismissNotice: () => void;
 }
 
 /** Builds one long-lived `InterpreterSession` per mode, backed by the real Realtime/Cascade adapters. */
@@ -119,6 +143,7 @@ export function useInterpreterSession(
 
   const [transcriptState, dispatchTranscript] = useReducer(reduceTranscript, INITIAL_TRANSCRIPT_STATE);
   const [latencyState, dispatchLatency] = useReducer(reduceLatency, INITIAL_LATENCY_STATE);
+  const [notice, setNotice] = useState<SessionNotice | null>(null);
 
   useEffect(() => {
     return activeSession.subscribeToTranscript((update) => dispatchTranscript({ kind: 'update', update }));
@@ -126,6 +151,14 @@ export function useInterpreterSession(
 
   useEffect(() => {
     return activeSession.subscribeToLatency?.((report) => dispatchLatency({ kind: 'report', report }));
+  }, [activeSession]);
+
+  // Issue #12: a notice is scoped to the session that produced it — a fresh
+  // Start, a Reconnect, or switching which transport is active should never
+  // leave a stale one from a previous conversation on screen.
+  useEffect(() => {
+    setNotice(null);
+    return activeSession.subscribeToNotice?.((next) => setNotice(next));
   }, [activeSession]);
 
   useEffect(() => {
@@ -164,16 +197,30 @@ export function useInterpreterSession(
     mode,
     status: state.status,
     errorMessage: state.errorMessage,
+    errorKind: state.errorKind,
+    reconnectable: state.reconnectable,
     switching,
     transcriptEntries: transcriptState.entries,
     latencyReports: selectRecentReports(latencyState),
     latencyAverages: selectLatencyAverages(latencyState),
+    notice,
     setMode,
     start: () => {
       dispatchTranscript({ kind: 'reset' });
       dispatchLatency({ kind: 'reset' });
+      setNotice(null);
       void activeSession.start(pair);
     },
     stop: () => activeSession.stop(),
+    // Deliberately mirrors setMode's mid-session branch: stop() fully
+    // releases the dead transport's resources before start() requests a
+    // fresh mic stream, and neither transcript nor latency history is reset
+    // — this is "the same conversation, transport came back", not a new one.
+    reconnect: () => {
+      activeSession.stop();
+      setNotice(null);
+      void activeSession.start(pairRef.current);
+    },
+    dismissNotice: () => setNotice(null),
   };
 }

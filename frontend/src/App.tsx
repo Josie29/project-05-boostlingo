@@ -36,13 +36,18 @@ function App() {
           mode={session.mode}
           status={session.status}
           errorMessage={session.errorMessage}
+          errorKind={session.errorKind}
+          reconnectable={session.reconnectable}
           switching={session.switching}
           transcriptEntries={session.transcriptEntries}
           latencyReports={session.latencyReports}
           latencyAverages={session.latencyAverages}
+          notice={session.notice}
           onModeChange={session.setMode}
           onStart={session.start}
           onStop={session.stop}
+          onReconnect={session.reconnect}
+          onDismissNotice={session.dismissNotice}
         />
       </main>
     </div>

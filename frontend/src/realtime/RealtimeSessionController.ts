@@ -1,7 +1,9 @@
 import { createRealtimeSession, type LanguagePair, type RealtimeSessionInfo } from '../api';
 import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
+import { MicAccessError, wrapMicError } from '../audio/micErrors';
 import {
   INITIAL_REALTIME_SESSION_STATE,
+  type RealtimeErrorKind,
   type RealtimeSessionState,
   type RealtimeSessionStatus,
 } from './types';
@@ -143,8 +145,13 @@ export class RealtimeSessionController {
     };
   }
 
-  private setState(status: RealtimeSessionStatus, errorMessage: string | null = null): void {
-    this.state = { status, errorMessage };
+  private setState(
+    status: RealtimeSessionStatus,
+    errorMessage: string | null = null,
+    errorKind: RealtimeErrorKind = null,
+    reconnectable = false,
+  ): void {
+    this.state = { status, errorMessage, errorKind, reconnectable };
     for (const listener of this.listeners) listener(this.state);
   }
 
@@ -185,7 +192,9 @@ export class RealtimeSessionController {
     this.setState('requesting-mic');
 
     try {
-      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
+      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS }).catch((rawError: unknown) => {
+        throw wrapMicError(rawError);
+      });
       if (myGeneration !== this.generation) {
         // stop() ran while the mic prompt was pending; discard the now-unwanted stream.
         for (const track of localStream.getTracks()) track.stop();
@@ -206,6 +215,19 @@ export class RealtimeSessionController {
 
       peerConnection.ontrack = (event) => {
         this.audioElement.srcObject = event.streams[0] ?? null;
+      };
+      // Issue #12: the only way this controller previously noticed a dead peer
+      // connection was the user hitting Stop — a network drop or the remote
+      // side hanging up mid-call left `status` stuck on `'connected'` forever.
+      // `'failed'`/`'disconnected'` both mean the media path is down; `'closed'`
+      // is excluded since our own `teardown()` reaching this same state is
+      // expected, not a failure to report.
+      peerConnection.onconnectionstatechange = () => {
+        if (myGeneration !== this.generation) return;
+        const state = peerConnection.connectionState;
+        if (state === 'failed' || state === 'disconnected') {
+          this.handlePostConnectFailure('The realtime connection was lost.');
+        }
       };
 
       this.dataChannel = peerConnection.createDataChannel(DATA_CHANNEL_LABEL);
@@ -230,9 +252,30 @@ export class RealtimeSessionController {
     } catch (error) {
       if (myGeneration !== this.generation) return;
       this.teardown();
+      if (error instanceof MicAccessError) {
+        this.setState('error', error.message, error.kind);
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to start the realtime session.';
+      // Never reconnectable here: every failure this catch can see happened
+      // before `'connected'` was ever reached (mic/token/negotiation) — see
+      // `handlePostConnectFailure` for the mid-session, reconnectable case.
       this.setState('error', message);
     }
+  }
+
+  /**
+   * Transitions a live `'connected'` session to `'error'` on a post-connect
+   * problem (issue #12: a WebRTC connection drop) — a no-op otherwise, e.g.
+   * a late `connectionstatechange` firing after our own `stop()` already
+   * tore things down. Marks the resulting state `reconnectable: true` so the
+   * shared UI offers "Reconnect" (fresh `start()`, same pair, transcript
+   * preserved) rather than treating this like a pre-connect failure.
+   */
+  private handlePostConnectFailure(message: string): void {
+    if (this.state.status !== 'connected') return;
+    this.teardown();
+    this.setState('error', message, null, true);
   }
 
   /** Tears down the peer connection, data channel, and mic tracks, then returns to `'idle'`. Idempotent. */
@@ -250,6 +293,7 @@ export class RealtimeSessionController {
       this.dataChannel = null;
     }
     if (this.peerConnection) {
+      this.peerConnection.onconnectionstatechange = null;
       this.peerConnection.ontrack = null;
       this.peerConnection.close();
       this.peerConnection = null;

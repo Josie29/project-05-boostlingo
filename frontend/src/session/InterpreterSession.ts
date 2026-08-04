@@ -18,15 +18,58 @@ export type SessionMode = 'realtime' | 'cascade';
  */
 export type SessionStatus = 'idle' | 'requesting-mic' | 'connecting' | 'connected' | 'error';
 
+/**
+ * Narrows *why* an `'error'` status happened, for the two cases the shared UI
+ * (issue #12) needs to render distinctly from a generic failure message:
+ * `getUserMedia` being denied outright vs. no microphone existing at all.
+ * `null` for every other failure (a token-mint 503/502/400, a dead socket, a
+ * per-stage cascade failure that killed the session, ...), which the plain
+ * `errorMessage` already explains well enough on its own.
+ */
+export type SessionErrorKind = 'mic-denied' | 'mic-not-found' | null;
+
 /** Small state snapshot the UI renders from, regardless of which mode produced it. */
 export interface SessionState {
   status: SessionStatus;
   /** Human-readable failure reason, set only when `status` is `'error'`. */
   errorMessage: string | null;
+  /** See {@link SessionErrorKind}. `null` unless `status` is `'error'`. */
+  errorKind: SessionErrorKind;
+  /**
+   * True when `status` is `'error'` *because a previously-`'connected'` session
+   * died mid-call* (a cascade stage error with `recoverable: false`, or a
+   * WebRTC connection drop) — issue #12's Reconnect affordance, which tears
+   * the dead transport down and starts a fresh one with the same language
+   * pair while preserving transcript history, applies only to this case.
+   * `false` for a failure that never reached `'connected'` in the first place
+   * (a denied mic, a failed token mint), where a plain `start()` retry is
+   * already the right recovery and there is nothing "re-" about it.
+   */
+  reconnectable: boolean;
 }
 
 /** The state every session starts in and returns to after `stop()`. */
-export const INITIAL_SESSION_STATE: SessionState = { status: 'idle', errorMessage: null };
+export const INITIAL_SESSION_STATE: SessionState = {
+  status: 'idle',
+  errorMessage: null,
+  errorKind: null,
+  reconnectable: false,
+};
+
+/**
+ * One non-fatal, dismissible notice (issue #12): a single cascade stage
+ * failure (`recoverable: true` — one utterance's MT/TTS request failed, or
+ * STT hiccuped and successfully reopened) that the session survived without
+ * dropping to `'error'`. `id` changes on every new notice so
+ * `SessionPanel` can tell "the listener dismissed this one" apart from "a
+ * new one just arrived and should reappear even if the last one was
+ * dismissed". Realtime has no per-stage failures of its own, so only
+ * `CascadeInterpreterSession` ever emits one — see `InterpreterSession.subscribeToNotice`'s remarks.
+ */
+export interface SessionNotice {
+  id: string;
+  message: string;
+}
 
 /** True while a session has live resources (mic, socket, or peer connection) that a mode switch must tear down first. */
 export function isLiveStatus(status: SessionStatus): boolean {
@@ -36,6 +79,7 @@ export function isLiveStatus(status: SessionStatus): boolean {
 type StateListener = (state: SessionState) => void;
 type TranscriptListener = (update: TranscriptUpdate) => void;
 type LatencyListener = (report: LatencyReport) => void;
+type NoticeListener = (notice: SessionNotice) => void;
 type Unsubscribe = () => void;
 
 /**
@@ -76,6 +120,16 @@ export interface InterpreterSession {
    * implement it. Returns an unsubscribe function.
    */
   subscribeToLatency?(listener: LatencyListener): Unsubscribe;
+  /**
+   * Subscribes to mode-agnostic {@link SessionNotice}s (issue #12): non-fatal,
+   * per-stage failures that don't change `status`. Optional so a transport
+   * with no notion of a "one utterance failed but the session lives" case
+   * (Realtime, whose only failures are session-level) can simply omit it,
+   * mirroring {@link subscribeToLatency}'s optionality. Only
+   * `CascadeInterpreterSession` implements it today. Returns an unsubscribe
+   * function.
+   */
+  subscribeToNotice?(listener: NoticeListener): Unsubscribe;
   /** Requests mic access and opens the session for the given language pair. A no-op while already live; call `stop()` first to retry from `'error'`. */
   start(pair: LanguagePair): Promise<void>;
   /** Tears the session down cleanly (safe to call from any state, including already idle). */

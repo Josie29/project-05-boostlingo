@@ -45,6 +45,8 @@ function fakePeerConnection() {
   const dataChannel = fakeDataChannel();
   const pc = {
     ontrack: null as ((event: { streams: MediaStream[] }) => void) | null,
+    onconnectionstatechange: null as (() => void) | null,
+    connectionState: 'new' as RTCPeerConnectionState,
     addTrack: vi.fn(),
     createDataChannel: vi.fn(() => dataChannel),
     createOffer: vi.fn(async () => ({ type: 'offer', sdp: 'fake-offer-sdp' })),
@@ -53,6 +55,12 @@ function fakePeerConnection() {
     close: vi.fn(),
   };
   return { pc: pc as unknown as RTCPeerConnection, dataChannel, raw: pc };
+}
+
+/** Drives `raw`'s `connectionState` to the given value and fires its `onconnectionstatechange` handler, mirroring how a real RTCPeerConnection would notify listeners. */
+function setConnectionState(raw: ReturnType<typeof fakePeerConnection>['raw'], state: RTCPeerConnectionState): void {
+  raw.connectionState = state;
+  raw.onconnectionstatechange?.();
 }
 
 /** Builds a working set of deps for the happy path; individual tests override what they need. */
@@ -94,7 +102,7 @@ describe('RealtimeSessionController', () => {
 
     await controller.start();
 
-    expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null, errorKind: null, reconnectable: false });
     // Order matters: the UI should see every intermediate state, not just the final one.
     expect(states).toEqual(['idle', 'requesting-mic', 'connecting', 'connected']);
   });
@@ -115,6 +123,8 @@ describe('RealtimeSessionController', () => {
     expect(controller.getState()).toEqual({
       status: 'error',
       errorMessage: 'The server is not configured with an OpenAI API key.',
+      errorKind: null,
+      reconnectable: false,
     });
   });
 
@@ -156,7 +166,7 @@ describe('RealtimeSessionController', () => {
     expect(track.stop).toHaveBeenCalledOnce();
     expect(dataChannel.close).toHaveBeenCalledOnce();
     expect(pc.close).toHaveBeenCalledOnce();
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
   });
 
   // Catches an accumulation bug: running start()/stop() several times in a row
@@ -185,7 +195,7 @@ describe('RealtimeSessionController', () => {
     expect(connections[1].raw.close).toHaveBeenCalledOnce();
     // Same controller reuses one audio element across cycles rather than creating new ones.
     expect(controller.getAudioElement()).toBe(audioElement);
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
   });
 
   // Catches a race where calling Stop while the mic permission prompt is still
@@ -211,7 +221,7 @@ describe('RealtimeSessionController', () => {
     await startPromise;
 
     expect(pendingTrack.stop).toHaveBeenCalledOnce();
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
   });
 
   it('opens an "oai-events" data channel during negotiation', async () => {
@@ -313,5 +323,96 @@ describe('RealtimeSessionController', () => {
     ).not.toThrow();
 
     expect(events).toEqual([]);
+  });
+
+  // Catches the bug this issue (#12) is about: a mic permission denial (an
+  // everyday real-world case, not a theoretical one) surfacing as the same
+  // undifferentiated error as any other failure, instead of the distinct
+  // "here's how to fix it" guidance the shared UI renders off `errorKind`.
+  it('classifies a NotAllowedError from getUserMedia as "mic-denied"', async () => {
+    const deps = buildDeps({
+      getUserMedia: vi.fn(async () => {
+        throw new DOMException('Permission denied', 'NotAllowedError');
+      }),
+    });
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+
+    const state = controller.getState();
+    expect(state.status).toBe('error');
+    expect(state.errorKind).toBe('mic-denied');
+    expect(state.reconnectable).toBe(false);
+  });
+
+  // Catches the sibling classification bug: "no mic exists" needs its own
+  // guidance (connect a mic), distinct from "you denied the permission
+  // prompt" (change a browser setting) — conflating the two would send a
+  // listener down the wrong troubleshooting path.
+  it('classifies a NotFoundError from getUserMedia as "mic-not-found"', async () => {
+    const deps = buildDeps({
+      getUserMedia: vi.fn(async () => {
+        throw new DOMException('No microphone found', 'NotFoundError');
+      }),
+    });
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+
+    expect(controller.getState().errorKind).toBe('mic-not-found');
+  });
+
+  // Catches the bug this issue (#12) is centrally about for Realtime: before
+  // this, nothing ever observed the peer connection after negotiation
+  // finished, so a network drop or the remote hanging up mid-call left
+  // `status` stuck on `'connected'` forever with no way for the UI to offer
+  // Reconnect.
+  it('transitions a connected session to "error" (reconnectable) when the peer connection reports "failed"', async () => {
+    const { pc, raw } = fakePeerConnection();
+    const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+    expect(controller.getState().status).toBe('connected');
+
+    setConnectionState(raw, 'failed');
+
+    expect(controller.getState()).toEqual({
+      status: 'error',
+      errorMessage: 'The realtime connection was lost.',
+      errorKind: null,
+      reconnectable: true,
+    });
+    expect(raw.close).toHaveBeenCalledOnce();
+  });
+
+  // Same trigger as the "failed" case above, but for "disconnected" — some
+  // browsers/networks report a dropped connection this way instead of (or
+  // before) "failed", and both need the same Reconnect-eligible treatment.
+  it('transitions a connected session to "error" (reconnectable) when the peer connection reports "disconnected"', async () => {
+    const { pc, raw } = fakePeerConnection();
+    const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+    setConnectionState(raw, 'disconnected');
+
+    expect(controller.getState().status).toBe('error');
+    expect(controller.getState().reconnectable).toBe(true);
+  });
+
+  // Catches an over-eager bug: our own stop()/teardown() also drives the peer
+  // connection to "closed" as a side effect of calling close() — if that
+  // were treated as a failure too, every ordinary Stop would spuriously
+  // report a lost connection instead of a clean idle teardown.
+  it('does not treat a "closed" connectionState as a connection failure', async () => {
+    const { pc, raw } = fakePeerConnection();
+    const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+    setConnectionState(raw, 'closed');
+
+    expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null, errorKind: null, reconnectable: false });
   });
 });

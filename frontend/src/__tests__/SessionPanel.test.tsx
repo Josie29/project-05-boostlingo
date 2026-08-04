@@ -9,13 +9,18 @@ function renderPanel(overrides: Partial<SessionPanelProps> = {}) {
     mode: 'realtime',
     status: 'idle',
     errorMessage: null,
+    errorKind: null,
+    reconnectable: false,
     switching: false,
     transcriptEntries: [],
     latencyReports: [],
     latencyAverages: EMPTY_LATENCY_AVERAGES,
+    notice: null,
     onModeChange: vi.fn(),
     onStart: vi.fn(),
     onStop: vi.fn(),
+    onReconnect: vi.fn(),
+    onDismissNotice: vi.fn(),
     ...overrides,
   };
   render(<SessionPanel {...props} />);
@@ -113,5 +118,84 @@ describe('SessionPanel', () => {
     renderPanel({ status: 'error', errorMessage: 'The cascade WebSocket connection failed.' });
 
     expect(screen.getByRole('alert')).toHaveTextContent('The cascade WebSocket connection failed.');
+  });
+
+  // Catches the bug where a generic (non-reconnectable) error offers no way back in —
+  // a listener whose token mint failed, or whose mic permission was denied, needs a
+  // button that actually retries rather than a dead end.
+  it('shows a "Try again" button (not Reconnect) for a non-reconnectable error, wired to onStart', () => {
+    const props = renderPanel({ status: 'error', errorMessage: 'Failed to create realtime session (status 503).', reconnectable: false });
+
+    const retryButton = screen.getByRole('button', { name: 'Try again' });
+    expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument();
+
+    fireEvent.click(retryButton);
+
+    expect(props.onStart).toHaveBeenCalledOnce();
+  });
+
+  // Catches the core issue #12 acceptance criterion for a mid-session death: the
+  // affordance offered must be Reconnect (teardown + fresh start, same pair,
+  // transcript preserved) rather than the plain "Try again" a pre-connect failure gets.
+  it('shows a "Reconnect" button (not Try again) when reconnectable, wired to onReconnect', () => {
+    const props = renderPanel({ status: 'error', errorMessage: 'The realtime connection was lost.', reconnectable: true });
+
+    const reconnectButton = screen.getByRole('button', { name: 'Reconnect' });
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+
+    fireEvent.click(reconnectButton);
+
+    expect(props.onReconnect).toHaveBeenCalledOnce();
+  });
+
+  // Catches the bug this issue is centrally about: a mic permission denial rendering
+  // as the same undifferentiated error as any other failure, leaving a listener with
+  // no idea what to actually do about it.
+  it('renders mic-permission guidance text for a "mic-denied" error, distinct from "mic-not-found"', () => {
+    renderPanel({ status: 'error', errorMessage: 'Microphone access was blocked.', errorKind: 'mic-denied' });
+
+    expect(screen.getByText(/allow microphone access/i)).toBeInTheDocument();
+    expect(screen.queryByText(/connect a microphone/i)).not.toBeInTheDocument();
+  });
+
+  it('renders mic-not-found guidance text for a "mic-not-found" error', () => {
+    renderPanel({ status: 'error', errorMessage: 'No microphone was found.', errorKind: 'mic-not-found' });
+
+    expect(screen.getByText(/connect a microphone/i)).toBeInTheDocument();
+  });
+
+  // Catches the bug where mic guidance renders for every error, drowning out the
+  // (already sufficient) plain message for a generic failure with irrelevant text.
+  it('renders no guidance text when errorKind is null', () => {
+    renderPanel({ status: 'error', errorMessage: 'Something else failed.', errorKind: null });
+
+    expect(screen.queryByText(/allow microphone access/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/connect a microphone/i)).not.toBeInTheDocument();
+  });
+
+  // Catches the bug where a non-fatal, per-stage notice either never renders (a
+  // listener has no idea one utterance failed) or renders in a way indistinguishable
+  // from a fatal error (making a still-connected session look dead).
+  it('renders a dismissible notice strip while connected, separate from the fatal error panel', () => {
+    const props = renderPanel({
+      status: 'connected',
+      notice: { id: 'notice_1', message: 'Machine translation failed for one utterance.' },
+    });
+
+    expect(screen.getByRole('status')).toHaveTextContent('Machine translation failed for one utterance.');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+
+    expect(props.onDismissNotice).toHaveBeenCalledOnce();
+  });
+
+  // Catches a stale-notice bug: a notice from a since-ended session lingering on
+  // screen after the session dropped to idle/error would misleadingly suggest the
+  // session is still connected and running.
+  it('does not render a notice once status is no longer connected', () => {
+    renderPanel({ status: 'idle', notice: { id: 'notice_1', message: 'Machine translation failed for one utterance.' } });
+
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });

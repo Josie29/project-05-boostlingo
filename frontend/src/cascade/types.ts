@@ -6,17 +6,30 @@
  */
 export type CascadeSessionStatus = 'idle' | 'requesting-mic' | 'connecting' | 'connected' | 'error';
 
+/**
+ * Narrows *why* an `'error'` status happened (issue #12). Mirrors
+ * `SessionErrorKind` (`../session/InterpreterSession.ts`) independently, same
+ * as `CascadeSessionStatus` already mirrors `SessionStatus`.
+ */
+export type CascadeErrorKind = 'mic-denied' | 'mic-not-found' | null;
+
 /** Small state snapshot the UI renders from. */
 export interface CascadeSessionState {
   status: CascadeSessionStatus;
   /** Human-readable failure reason, set only when `status` is `'error'`. */
   errorMessage: string | null;
+  /** See {@link CascadeErrorKind}. `null` unless `status` is `'error'`. */
+  errorKind: CascadeErrorKind;
+  /** True when a previously-`'connected'` session died (a `recoverable: false` stage/session error) rather than never having connected — drives the Reconnect vs. plain-retry affordance. See `SessionState.reconnectable`'s remarks. */
+  reconnectable: boolean;
 }
 
 /** The state a controller starts in and returns to after `stop()`. */
 export const INITIAL_CASCADE_SESSION_STATE: CascadeSessionState = {
   status: 'idle',
   errorMessage: null,
+  errorKind: null,
+  reconnectable: false,
 };
 
 /**
@@ -85,9 +98,28 @@ export interface CascadeSessionReadyPayload {
   channels: number;
 }
 
-/** Payload the server sends on `error`, matching `CascadeErrorPayload`. */
+/**
+ * Payload the server sends on `error`, matching `CascadeErrorPayload`
+ * (`backend/CascadeAudioSession.cs`). Extended for issue #12 with
+ * `stage`/`utteranceId`/`recoverable` alongside the original `message` field
+ * — additive, so a caller that only ever read `message` (pre-#12) keeps
+ * working. `stage` is one of `"stt"`/`"mt"`/`"tts"`/`"session"`, typed as
+ * `string` here rather than a frontend enum since nothing on this side
+ * branches on which stage failed today; `utteranceId` is the source-lane id,
+ * or `null` for a `"session"`-stage error not tied to any one utterance.
+ */
 export interface CascadeErrorPayload {
   message: string;
+  stage: string;
+  utteranceId: string | null;
+  /**
+   * `true` if the session keeps running as before after this error (one
+   * failed utterance, or a hiccup a retry already resolved elsewhere);
+   * `false` if `stage` is now unusable for the rest of the session and the
+   * client should transition to `'error'` rather than treat this as a
+   * one-off. See `CascadeSessionController`'s handling of this envelope.
+   */
+  recoverable: boolean;
 }
 
 /**

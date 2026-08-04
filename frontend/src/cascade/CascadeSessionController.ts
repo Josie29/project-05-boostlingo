@@ -2,11 +2,13 @@ import type { CascadeAudioCapture } from './CascadeAudioCapture';
 import { MicPcmCapture } from './MicPcmCapture';
 import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
 import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
+import { MicAccessError, wrapMicError } from '../audio/micErrors';
 import {
   CASCADE_ENVELOPE_VERSION,
   CascadeMessageType,
   INITIAL_CASCADE_SESSION_STATE,
   type CascadeBargeInPayload,
+  type CascadeErrorKind,
   type CascadeErrorPayload,
   type CascadeSessionState,
   type CascadeSessionStatus,
@@ -53,6 +55,20 @@ type Listener = (state: CascadeSessionState) => void;
 type EventListener = (event: unknown) => void;
 
 /**
+ * One non-fatal, per-stage failure (issue #12: `recoverable: true` on an
+ * `error` envelope) — the session keeps running exactly as it was;
+ * `CascadeInterpreterSession.subscribeToNotice` is what turns this into the
+ * mode-agnostic `SessionNotice` shared UI renders as a dismissible strip.
+ * `utteranceId` is `null` for a `"session"`-stage recoverable error not tied
+ * to any one utterance (e.g. an unknown control-message type).
+ */
+export interface CascadeNoticeEvent {
+  message: string;
+  utteranceId: string | null;
+}
+type NoticeListener = (notice: CascadeNoticeEvent) => void;
+
+/**
  * One event in a single TTS (Text-to-Speech) utterance's binary-audio
  * window, already associated with its `utteranceId` by the state machine in
  * {@link CascadeSessionController} (see the `onmessage` handling of
@@ -93,6 +109,7 @@ export class CascadeSessionController {
   private readonly listeners = new Set<Listener>();
   private readonly eventListeners = new Set<EventListener>();
   private readonly audioListeners = new Set<AudioEventListener>();
+  private readonly noticeListeners = new Set<NoticeListener>();
 
   private state: CascadeSessionState = INITIAL_CASCADE_SESSION_STATE;
   private localStream: MediaStream | null = null;
@@ -161,8 +178,27 @@ export class CascadeSessionController {
     };
   }
 
-  private setState(status: CascadeSessionStatus, errorMessage: string | null = null): void {
-    this.state = { status, errorMessage };
+  /**
+   * Subscribes to {@link CascadeNoticeEvent}s (issue #12) — every
+   * `recoverable: true` `error` envelope received once this session is
+   * `'connected'`, distinct from `subscribeToEvents`' unfiltered fan-out so
+   * `CascadeInterpreterSession` doesn't need to re-parse the envelope shape
+   * itself. Returns an unsubscribe function.
+   */
+  subscribeToNotice(listener: NoticeListener): () => void {
+    this.noticeListeners.add(listener);
+    return () => {
+      this.noticeListeners.delete(listener);
+    };
+  }
+
+  private setState(
+    status: CascadeSessionStatus,
+    errorMessage: string | null = null,
+    errorKind: CascadeErrorKind = null,
+    reconnectable = false,
+  ): void {
+    this.state = { status, errorMessage, errorKind, reconnectable };
     for (const listener of this.listeners) listener(this.state);
   }
 
@@ -190,7 +226,9 @@ export class CascadeSessionController {
     this.setState('requesting-mic');
 
     try {
-      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
+      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS }).catch((rawError: unknown) => {
+        throw wrapMicError(rawError);
+      });
       if (myGeneration !== this.generation) {
         // stop() ran while the mic prompt was pending; discard the now-unwanted stream.
         for (const track of localStream.getTracks()) track.stop();
@@ -206,7 +244,14 @@ export class CascadeSessionController {
     } catch (error) {
       if (myGeneration !== this.generation) return;
       this.teardown(false);
+      if (error instanceof MicAccessError) {
+        this.setState('error', error.message, error.kind);
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to start the cascade session.';
+      // Never reconnectable here: every failure this catch can see happened
+      // before `'connected'` was ever reached — see `handlePostConnectFailure`
+      // for the mid-session, reconnectable case (issue #12).
       this.setState('error', message);
     }
   }
@@ -291,12 +336,25 @@ export class CascadeSessionController {
               settleReject(captureError instanceof Error ? captureError.message : 'Failed to start mic capture.');
             });
         } else if (envelope.type === CascadeMessageType.Error) {
-          const message = (envelope.payload as CascadeErrorPayload | undefined)?.message
-            ?? 'The cascade server reported an error.';
+          const payload = envelope.payload as CascadeErrorPayload | undefined;
+          const message = payload?.message ?? 'The cascade server reported an error.';
           if (!settled) {
+            // A failure before the handshake settled always fails start() outright —
+            // recoverable or not, there's no live session yet for a one-off notice to
+            // apply to.
             settleReject(message);
-          } else {
+          } else if (payload?.recoverable === false) {
+            // Issue #12: this stage (or the session/transport itself) is now dead for
+            // the rest of the session — e.g. STT's one reopen attempt also failed.
             this.handlePostConnectFailure(message);
+          } else {
+            // recoverable: true (or, defensively, a payload missing the field
+            // altogether) — one utterance's stage failed but the session keeps running
+            // exactly as before; surfaced as a notice instead of tearing the session
+            // down.
+            for (const listener of this.noticeListeners) {
+              listener({ message, utteranceId: payload?.utteranceId ?? null });
+            }
           }
         } else if (envelope.type === CascadeMessageType.TtsAudioStart) {
           const payload = envelope.payload as CascadeTtsAudioStartPayload | undefined;
@@ -358,11 +416,18 @@ export class CascadeSessionController {
     });
   }
 
-  /** Transitions a live `'connected'` session to `'error'` on a post-handshake socket problem. A no-op otherwise (e.g. our own teardown already closed the socket). */
+  /**
+   * Transitions a live `'connected'` session to `'error'` on a post-handshake
+   * socket problem, or a `recoverable: false` stage/session error (issue
+   * #12). A no-op otherwise (e.g. our own teardown already closed the
+   * socket). Marks the resulting state `reconnectable: true` so the shared UI
+   * offers "Reconnect" (fresh `start()`, same pair, transcript preserved)
+   * rather than treating this like a pre-connect failure.
+   */
   private handlePostConnectFailure(message: string): void {
     if (this.state.status !== 'connected') return;
     this.teardown(false);
-    this.setState('error', message);
+    this.setState('error', message, null, true);
   }
 
   /** Tears down the WebSocket and mic capture, then returns to `'idle'`. Idempotent. */

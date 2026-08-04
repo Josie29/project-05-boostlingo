@@ -21,13 +21,18 @@ function stubHook(overrides: Partial<UseInterpreterSessionResult> = {}): void {
     mode: 'realtime',
     status: 'idle',
     errorMessage: null,
+    errorKind: null,
+    reconnectable: false,
     switching: false,
     transcriptEntries: [],
     latencyReports: [],
     latencyAverages: EMPTY_LATENCY_AVERAGES,
+    notice: null,
     setMode: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
+    reconnect: vi.fn(),
+    dismissNotice: vi.fn(),
     ...overrides,
   } satisfies UseInterpreterSessionResult);
 }

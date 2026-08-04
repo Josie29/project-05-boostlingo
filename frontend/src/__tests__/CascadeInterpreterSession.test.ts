@@ -257,4 +257,33 @@ describe('CascadeInterpreterSession', () => {
 
     expect(flushSpy).toHaveBeenCalledWith(['utt-1-target']);
   });
+
+  // Catches the bug where a recoverable per-stage error (issue #12) never reaches
+  // shared UI at all — `subscribeToNotice` is the only thing that turns the
+  // controller's cascade-specific `CascadeNoticeEvent` into the mode-agnostic
+  // `SessionNotice` `useInterpreterSession` renders as a dismissible strip.
+  it('surfaces a recoverable error envelope as a SessionNotice via subscribeToNotice', async () => {
+    const ws = fakeWebSocket();
+    const controller = new CascadeSessionController(buildControllerDeps({ createWebSocket: () => toWebSocket(ws) }));
+    const session = new CascadeInterpreterSession(controller, new AudioPlaybackQueue({ createAudioContext: fakeAudioContext }));
+    const notices: unknown[] = [];
+    session.subscribeToNotice?.((notice) => notices.push(notice));
+
+    const startPromise = session.start({ sourceLang: 'en', targetLang: 'es' });
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'error',
+        payload: { message: 'Machine translation failed for one utterance.', stage: 'mt', utteranceId: 'utt_1', recoverable: true },
+      }),
+    });
+
+    expect(notices).toEqual([{ id: 'cascade:notice:1', message: 'Machine translation failed for one utterance.' }]);
+    // A recoverable error is a notice, not a state change — the session stays connected.
+    expect(session.getState().status).toBe('connected');
+  });
 });

@@ -5,7 +5,7 @@ import { mapCascadeEventToTranscriptUpdate } from '../cascade/cascadeTranscriptA
 import { CascadeLatencyTracker } from '../latency/cascadeLatencyAdapter';
 import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
-import { prefixId, prefixUtteranceId, type InterpreterSession, type SessionState } from './InterpreterSession';
+import { prefixId, prefixUtteranceId, type InterpreterSession, type SessionNotice, type SessionState } from './InterpreterSession';
 
 /**
  * Thin adapter presenting {@link CascadeSessionController} as an
@@ -39,6 +39,8 @@ export class CascadeInterpreterSession implements InterpreterSession {
   private readonly playbackQueue: AudioPlaybackQueue;
   private readonly latencyTracker: CascadeLatencyTracker;
   private readonly latencyListeners = new Set<(report: LatencyReport) => void>();
+  /** Mints a fresh id per notice (issue #12) so `SessionPanel` can tell a new one apart from an already-dismissed one — see `SessionNotice`'s remarks. */
+  private noticeSeq = 0;
 
   constructor(
     controller: CascadeSessionController = new CascadeSessionController(),
@@ -82,6 +84,19 @@ export class CascadeInterpreterSession implements InterpreterSession {
     return () => {
       this.latencyListeners.delete(listener);
     };
+  }
+
+  /**
+   * Translates the controller's cascade-specific {@link CascadeNoticeEvent}s
+   * (one `recoverable: true` stage failure — issue #12) into the
+   * mode-agnostic {@link SessionNotice} shared UI understands, discarding
+   * the wire-level `utteranceId` (not something shared UI needs to render a
+   * dismissible strip) and minting a fresh id per notice.
+   */
+  subscribeToNotice(listener: (notice: SessionNotice) => void): () => void {
+    return this.controller.subscribeToNotice((notice) => {
+      listener({ id: `${this.mode}:notice:${++this.noticeSeq}`, message: notice.message });
+    });
   }
 
   start(pair: LanguagePair): Promise<void> {

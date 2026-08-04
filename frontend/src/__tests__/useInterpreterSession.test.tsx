@@ -2,7 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { LanguagePair } from '../api';
 import type { LatencyReport } from '../latency/types';
-import type { InterpreterSession, SessionMode, SessionState } from '../session/InterpreterSession';
+import type { InterpreterSession, SessionMode, SessionNotice, SessionState } from '../session/InterpreterSession';
 import { useInterpreterSession } from '../session/useInterpreterSession';
 import type { TranscriptUpdate } from '../transcript/types';
 
@@ -17,11 +17,15 @@ function createInstantFakeSession(mode: SessionMode, callOrder: string[]): Inter
   stopCalls: number;
   emitTranscript: (update: TranscriptUpdate) => void;
   emitLatency: (report: LatencyReport) => void;
+  emitNotice: (notice: SessionNotice) => void;
+  /** Lets a test drive this fake straight to `'connected'` with no intervening `'connecting'` state, then simulate a mid-session death via `failMidSession`. */
+  failMidSession: (message: string) => void;
 } {
-  let state: SessionState = { status: 'idle', errorMessage: null };
+  let state: SessionState = { status: 'idle', errorMessage: null, errorKind: null, reconnectable: false };
   const stateListeners = new Set<(state: SessionState) => void>();
   const transcriptListeners = new Set<(update: TranscriptUpdate) => void>();
   const latencyListeners = new Set<(report: LatencyReport) => void>();
+  const noticeListeners = new Set<(notice: SessionNotice) => void>();
 
   function setState(next: SessionState): void {
     state = next;
@@ -46,22 +50,32 @@ function createInstantFakeSession(mode: SessionMode, callOrder: string[]): Inter
       latencyListeners.add(listener);
       return () => latencyListeners.delete(listener);
     },
+    subscribeToNotice: (listener: (notice: SessionNotice) => void) => {
+      noticeListeners.add(listener);
+      return () => noticeListeners.delete(listener);
+    },
     start: vi.fn(async (pair: LanguagePair) => {
       callOrder.push(`${mode}:start`);
       session.startCalls.push(pair);
-      setState({ status: 'connecting', errorMessage: null });
-      setState({ status: 'connected', errorMessage: null });
+      setState({ status: 'connecting', errorMessage: null, errorKind: null, reconnectable: false });
+      setState({ status: 'connected', errorMessage: null, errorKind: null, reconnectable: false });
     }),
     stop: vi.fn(() => {
       callOrder.push(`${mode}:stop`);
       session.stopCalls += 1;
-      setState({ status: 'idle', errorMessage: null });
+      setState({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
     }),
     emitTranscript: (update: TranscriptUpdate) => {
       for (const listener of transcriptListeners) listener(update);
     },
     emitLatency: (report: LatencyReport) => {
       for (const listener of latencyListeners) listener(report);
+    },
+    emitNotice: (notice: SessionNotice) => {
+      for (const listener of noticeListeners) listener(notice);
+    },
+    failMidSession: (message: string) => {
+      setState({ status: 'error', errorMessage: message, errorKind: null, reconnectable: true });
     },
   };
   return session;
@@ -212,7 +226,7 @@ describe('useInterpreterSession', () => {
     // `getState`/`subscribe` must hand back a stable reference until the state actually
     // changes — same contract the real controllers uphold — otherwise useSyncExternalStore
     // sees a "new" snapshot on every render and loops forever.
-    const idleState: SessionState = { status: 'idle', errorMessage: null };
+    const idleState: SessionState = { status: 'idle', errorMessage: null, errorKind: null, reconnectable: false };
     const cascadeSession: InterpreterSession = {
       mode: 'cascade',
       getState: () => idleState,
@@ -262,5 +276,94 @@ describe('useInterpreterSession', () => {
 
     expect(callOrder).toEqual([]);
     expect(realtimeSession.stopCalls).toBe(0);
+  });
+
+  // Catches the bug where a per-stage cascade notice (issue #12) either never
+  // reaches the UI, or gets dropped/duplicated on its way through the hook.
+  it('surfaces a notice emitted by the active session', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitNotice({ id: 'notice_1', message: 'Machine translation failed for one utterance.' }));
+
+    expect(result.current.notice).toEqual({ id: 'notice_1', message: 'Machine translation failed for one utterance.' });
+  });
+
+  // Catches the bug where dismissing a notice doesn't actually clear it, leaving a
+  // listener unable to get rid of a strip they've already acknowledged.
+  it('clears the notice when dismissNotice is called', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitNotice({ id: 'notice_1', message: 'Machine translation failed for one utterance.' }));
+    expect(result.current.notice).not.toBeNull();
+
+    act(() => result.current.dismissNotice());
+
+    expect(result.current.notice).toBeNull();
+  });
+
+  // Catches the core issue #12 acceptance criterion: reconnecting after a
+  // mid-session death must preserve everything said so far — a listener who just
+  // watched the transport die shouldn't also lose the conversation transcript,
+  // the way a brand-new top-level Start deliberately clears it.
+  it('preserves transcript entries across reconnect(), unlike a fresh start()', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() =>
+      realtimeSession.emitTranscript({ utteranceId: 'realtime:item_1', lane: 'source', text: 'Hola', final: true }),
+    );
+    act(() => realtimeSession.failMidSession('The realtime connection was lost.'));
+    expect(result.current.status).toBe('error');
+    expect(result.current.reconnectable).toBe(true);
+    callOrder.length = 0;
+
+    act(() => result.current.reconnect());
+
+    // stop() before start() — exactly like setMode's mid-session branch — so the dead
+    // transport's resources are fully released before a fresh one is requested.
+    expect(callOrder).toEqual(['realtime:stop', 'realtime:start']);
+    // Two calls total: the original start() earlier in this test, plus reconnect()'s.
+    expect(realtimeSession.startCalls).toEqual([PAIR, PAIR]);
+    expect(result.current.transcriptEntries).toEqual([
+      { id: 'realtime:item_1', lane: 'source', text: 'Hola', final: true },
+    ]);
+  });
+
+  // Catches a stale-notice bug: reconnecting from a mid-session death should clear
+  // whatever notice was showing beforehand, the same way a fresh start() does — an
+  // old per-stage notice lingering past a Reconnect would misleadingly suggest it's
+  // still relevant to the new connection.
+  it('clears any pending notice on reconnect()', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitNotice({ id: 'notice_1', message: 'Machine translation failed for one utterance.' }));
+    act(() => realtimeSession.failMidSession('The realtime connection was lost.'));
+
+    act(() => result.current.reconnect());
+
+    expect(result.current.notice).toBeNull();
   });
 });

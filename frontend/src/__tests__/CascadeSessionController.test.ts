@@ -148,7 +148,7 @@ describe('CascadeSessionController', () => {
     completeHandshake(ws);
     await startPromise;
 
-    expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null, errorKind: null, reconnectable: false });
     expect(states).toEqual(['idle', 'requesting-mic', 'connecting', 'connected']);
   });
 
@@ -246,15 +246,23 @@ describe('CascadeSessionController', () => {
     ws.onmessage?.({ data: JSON.stringify({ v: 1, type: 'error', payload: { message: 'Malformed session.start payload.' } }) });
     await startPromise;
 
-    expect(controller.getState()).toEqual({ status: 'error', errorMessage: 'Malformed session.start payload.' });
+    expect(controller.getState()).toEqual({
+      status: 'error',
+      errorMessage: 'Malformed session.start payload.',
+      errorKind: null,
+      reconnectable: false,
+    });
     expect(capture.start).not.toHaveBeenCalled();
     expect(ws.close).toHaveBeenCalledOnce();
   });
 
-  // Catches the bug where an error arriving mid-session (e.g. a pipeline
-  // failure in a later stage) is silently dropped because the controller
-  // only ever checked for errors during the initial handshake.
-  it('transitions a connected session to "error" and tears down when the server sends an error envelope', async () => {
+  // Catches the bug where an unrecoverable error arriving mid-session (issue
+  // #12: `recoverable: false` — a stage, or the session itself, is now dead
+  // for good, e.g. STT's one reopen attempt also failed) is silently dropped
+  // because the controller only ever checked for errors during the initial
+  // handshake. `reconnectable: true` on the resulting state is what drives
+  // the shared UI's Reconnect affordance rather than a plain retry.
+  it('transitions a connected session to "error" (reconnectable) and tears down on an unrecoverable error envelope', async () => {
     const ws = fakeWebSocket();
     const track = fakeTrack();
     const { capture } = fakeAudioCapture();
@@ -270,12 +278,82 @@ describe('CascadeSessionController', () => {
     completeHandshake(ws);
     await startPromise;
 
-    ws.onmessage?.({ data: JSON.stringify({ v: 1, type: 'error', payload: { message: 'Pipeline error while processing audio.' } }) });
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'error',
+        payload: { message: "STT's stream died and could not be reopened.", stage: 'session', utteranceId: null, recoverable: false },
+      }),
+    });
 
-    expect(controller.getState()).toEqual({ status: 'error', errorMessage: 'Pipeline error while processing audio.' });
+    expect(controller.getState()).toEqual({
+      status: 'error',
+      errorMessage: "STT's stream died and could not be reopened.",
+      errorKind: null,
+      reconnectable: true,
+    });
     expect(capture.stop).toHaveBeenCalledOnce();
     expect(track.stop).toHaveBeenCalledOnce();
     expect(ws.close).toHaveBeenCalledOnce();
+  });
+
+  // Catches the core issue #12 regression this feature guards against: a
+  // *recoverable* per-stage failure (one utterance's MT request failed, say)
+  // must NOT tear the session down the way the unrecoverable case above
+  // does — the whole point of the recoverable/unrecoverable split is that
+  // the caller keeps talking uninterrupted through a one-off hiccup.
+  it('stays connected on a recoverable error envelope and fans it out as a notice instead of tearing down', async () => {
+    const ws = fakeWebSocket();
+    const track = fakeTrack();
+    const { capture } = fakeAudioCapture();
+    const deps = buildDeps({
+      getUserMedia: vi.fn(async () => fakeStream([track])),
+      createWebSocket: vi.fn(() => toWebSocket(ws)),
+      createAudioCapture: vi.fn(() => capture),
+    });
+    const controller = new CascadeSessionController(deps);
+    const notices: unknown[] = [];
+    controller.subscribeToNotice((notice) => notices.push(notice));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        v: 1,
+        type: 'error',
+        payload: { message: 'Machine translation failed for one utterance.', stage: 'mt', utteranceId: 'utt_1', recoverable: true },
+      }),
+    });
+
+    expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null, errorKind: null, reconnectable: false });
+    expect(capture.stop).not.toHaveBeenCalled();
+    expect(track.stop).not.toHaveBeenCalled();
+    expect(notices).toEqual([{ message: 'Machine translation failed for one utterance.', utteranceId: 'utt_1' }]);
+  });
+
+  // Catches a defensiveness regression: a payload missing `recoverable`
+  // altogether (any pre-#12 server build, however unlikely alongside this
+  // frontend) must default to the non-fatal notice path, not silently drop
+  // the session — the safer failure mode when the field's meaning is unknown.
+  it('treats an error envelope with no `recoverable` field as a non-fatal notice', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    const notices: unknown[] = [];
+    controller.subscribeToNotice((notice) => notices.push(notice));
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    ws.onmessage?.({ data: JSON.stringify({ v: 1, type: 'error', payload: { message: 'Pipeline error while processing audio.' } }) });
+
+    expect(controller.getState().status).toBe('connected');
+    expect(notices).toEqual([{ message: 'Pipeline error while processing audio.', utteranceId: null }]);
   });
 
   // Catches the core teardown bug: stop() must send session.stop, release the
@@ -304,7 +382,7 @@ describe('CascadeSessionController', () => {
     expect(ws.close).toHaveBeenCalledOnce();
     expect(capture.stop).toHaveBeenCalledOnce();
     expect(track.stop).toHaveBeenCalledOnce();
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
   });
 
   // Catches an accumulation bug: running start()/stop() several times in a
@@ -344,7 +422,7 @@ describe('CascadeSessionController', () => {
     expect(sockets[1].close).toHaveBeenCalledOnce();
     expect(captures[0].capture.stop).toHaveBeenCalledOnce();
     expect(captures[1].capture.stop).toHaveBeenCalledOnce();
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
   });
 
   // Catches a race where calling Stop while the mic permission prompt is
@@ -370,7 +448,7 @@ describe('CascadeSessionController', () => {
     await startPromise;
 
     expect(pendingTrack.stop).toHaveBeenCalledOnce();
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
   });
 
   // Catches a hang bug: calling stop() while the WebSocket handshake is still
@@ -389,7 +467,7 @@ describe('CascadeSessionController', () => {
     controller.stop();
     await startPromise;
 
-    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null });
+    expect(controller.getState()).toEqual({ status: 'idle', errorMessage: null, errorKind: null, reconnectable: false });
     expect(ws.close).toHaveBeenCalledOnce();
   });
 
@@ -406,7 +484,51 @@ describe('CascadeSessionController', () => {
 
     await controller.start();
 
-    expect(controller.getState()).toEqual({ status: 'error', errorMessage: 'Permission denied' });
+    expect(controller.getState()).toEqual({
+      status: 'error',
+      errorMessage: 'Permission denied',
+      errorKind: null,
+      reconnectable: false,
+    });
+  });
+
+  // Catches the bug this issue (#12) is about: a mic permission denial (an
+  // everyday real-world case, not a theoretical one) surfacing as the same
+  // undifferentiated error as any other failure, instead of the distinct
+  // "here's how to fix it" guidance the shared UI renders off `errorKind`.
+  it('classifies a NotAllowedError from getUserMedia as "mic-denied"', async () => {
+    const deps = buildDeps({
+      getUserMedia: vi.fn(async () => {
+        throw new DOMException('Permission denied', 'NotAllowedError');
+      }),
+    });
+    const controller = new CascadeSessionController(deps);
+
+    await controller.start();
+
+    const state = controller.getState();
+    expect(state.status).toBe('error');
+    expect(state.errorKind).toBe('mic-denied');
+    expect(state.reconnectable).toBe(false);
+  });
+
+  // Catches the sibling classification bug: "no mic exists" needs its own
+  // guidance (connect a mic), distinct from "you denied the permission
+  // prompt" (change a browser setting) — conflating the two would send a
+  // listener down the wrong troubleshooting path.
+  it('classifies a NotFoundError from getUserMedia as "mic-not-found"', async () => {
+    const deps = buildDeps({
+      getUserMedia: vi.fn(async () => {
+        throw new DOMException('No microphone found', 'NotFoundError');
+      }),
+    });
+    const controller = new CascadeSessionController(deps);
+
+    await controller.start();
+
+    const state = controller.getState();
+    expect(state.status).toBe('error');
+    expect(state.errorKind).toBe('mic-not-found');
   });
 
   // Catches a crash bug: a malformed control frame (not valid JSON) must not
