@@ -139,8 +139,10 @@ public sealed class OpenAiSttProvider(
         /// <c>input_audio_buffer.committed</c> maps to a <see cref="SttSegment.SpeechEnd"/>
         /// marker (#10, per-stage latency instrumentation - see that method's remarks
         /// for why <c>committed</c>, not <c>speech_started</c>/<c>speech_stopped</c>, is
-        /// the one VAD (Voice Activity Detection) event worth surfacing here). Everything
-        /// else (session lifecycle, etc.) is skipped.
+        /// the VAD (Voice Activity Detection) event worth surfacing there); separately,
+        /// <c>input_audio_buffer.speech_started</c> maps to a <see cref="SttSegment.SpeechStart"/>
+        /// marker (#11, barge-in detection). Everything else (session lifecycle,
+        /// speech_stopped, etc.) is skipped.
         /// </summary>
         /// <param name="json">One complete JSON text frame received from OpenAI.</param>
         /// <param name="timestampMs">Milliseconds since this stream was opened.</param>
@@ -183,10 +185,17 @@ public sealed class OpenAiSttProvider(
                     return SttSegment.SpeechEnd(GetString(root, "item_id") ?? "unknown", timestampMs);
 
                 case "input_audio_buffer.speech_started":
+                    // The VAD detected the speaker beginning a new utterance - no
+                    // item_id yet (that's only assigned at commit, handled above), so
+                    // this can't carry a latency mark the way SpeechEnd does. It is
+                    // still the earliest cross-network signal CascadePipeline has for
+                    // barge-in detection (#11): speech starting again while an earlier
+                    // utterance's translation/synthesis may still be in flight.
+                    return SttSegment.SpeechStart(timestampMs);
+
                 case "input_audio_buffer.speech_stopped":
-                    // VAD lifecycle events that don't carry an item_id yet (that's only
-                    // assigned at commit, handled above) - nothing to key a segment or
-                    // latency mark by from these alone.
+                    // Only tells us the speaker paused, which needs no reaction on its
+                    // own - nothing to key a segment or latency mark by from this alone.
                     return null;
 
                 case "error":

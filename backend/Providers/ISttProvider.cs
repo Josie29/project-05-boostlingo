@@ -19,7 +19,17 @@
 /// always <c>false</c> on a marker; consumers should check this flag first and skip
 /// transcript handling entirely when it is set. Defaults to <c>false</c> so every
 /// existing call site constructing a real transcript segment is unaffected.</param>
-public sealed record SttSegment(string UtteranceId, string Text, bool IsFinal, long TimestampMs, bool IsSpeechEndMarker = false)
+/// <param name="IsSpeechStartMarker"><c>true</c> for a speech-onset marker (see
+/// <see cref="SpeechStart"/>) - the provider's VAD detected the speaker beginning a new
+/// utterance, ahead of any transcript text and before the provider has assigned it an
+/// item id (see <see cref="SpeechStart"/>'s remarks on <c>UtteranceId</c>). This is the
+/// signal <c>CascadePipeline</c> uses to detect a barge-in (#11): speech starting again
+/// while downstream work for a still-unfinished earlier utterance may be in flight.
+/// Mutually exclusive with <see cref="IsSpeechEndMarker"/> - never both <c>true</c> on
+/// the same segment. Defaults to <c>false</c> so every existing call site constructing
+/// a real transcript segment or a speech-end marker is unaffected.</param>
+public sealed record SttSegment(
+    string UtteranceId, string Text, bool IsFinal, long TimestampMs, bool IsSpeechEndMarker = false, bool IsSpeechStartMarker = false)
 {
     /// <summary>
     /// Creates a speech-end boundary marker (#10, per-stage latency instrumentation):
@@ -34,6 +44,21 @@ public sealed record SttSegment(string UtteranceId, string Text, bool IsFinal, l
     /// <returns>A marker segment with empty text and <c>IsFinal: false</c>.</returns>
     public static SttSegment SpeechEnd(string utteranceId, long timestampMs) =>
         new(utteranceId, Text: string.Empty, IsFinal: false, timestampMs, IsSpeechEndMarker: true);
+
+    /// <summary>
+    /// Creates a speech-onset marker (#11, barge-in detection): no transcript text,
+    /// just the moment the provider's VAD detected the speaker starting a new
+    /// utterance. Unlike <see cref="SpeechEnd"/>, there is no utterance id to carry
+    /// yet - the provider (see <c>OpenAiSttProvider</c>'s remarks on
+    /// <c>input_audio_buffer.speech_started</c>) only assigns one once it commits the
+    /// utterance, which happens later, at speech end. <see cref="UtteranceId"/> is
+    /// therefore always empty on this marker; it is a session-level signal, not one
+    /// scoped to a particular utterance.
+    /// </summary>
+    /// <param name="timestampMs">Milliseconds since the stream started.</param>
+    /// <returns>A marker segment with empty id/text and <c>IsFinal: false</c>.</returns>
+    public static SttSegment SpeechStart(long timestampMs) =>
+        new(UtteranceId: string.Empty, Text: string.Empty, IsFinal: false, timestampMs, IsSpeechStartMarker: true);
 }
 
 /// <summary>Per-session configuration an <see cref="ISttProvider"/> needs to start a stream.</summary>
@@ -62,7 +87,9 @@ public interface ISttStream : IAsyncDisposable
     /// Reads every segment the provider produces, partials and finals alike, for as
     /// long as the stream stays open - plus, if the provider signals it, a leading
     /// <see cref="SttSegment.SpeechEnd"/> marker for an utterance before its transcript
-    /// segments arrive (#10, per-stage latency instrumentation). Completes (without
+    /// segments arrive (#10, per-stage latency instrumentation), and a
+    /// <see cref="SttSegment.SpeechStart"/> marker the moment the speaker begins a new
+    /// utterance, ahead of even that (#11, barge-in detection). Completes (without
     /// throwing) when the provider closes the stream normally, and stops early if
     /// <paramref name="cancellationToken"/> is cancelled.
     /// </summary>

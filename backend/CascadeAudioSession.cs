@@ -120,6 +120,27 @@ public static class CascadeMessageTypes
     /// <see cref="CascadeLatencyMarkPayload"/> and <see cref="CascadeLatencyStages"/>.
     /// </summary>
     public const string LatencyMark = "latency.mark";
+
+    /// <summary>
+    /// Server to client: the speaker started a new utterance while one or more earlier
+    /// utterances still had translation/synthesis work queued or in flight (#11,
+    /// barge-in). <see cref="CascadePipeline"/> has already cancelled that in-flight
+    /// work server-side; this event tells the client which utterances it applies to so
+    /// its own playback queue can be flushed - no stale audio from a cancelled
+    /// utterance should keep playing after this arrives. Only ever sent when at least
+    /// one utterance was actually superseded; a speech-onset signal with nothing in
+    /// flight produces no event at all. See <see cref="CascadeBargeInPayload"/>. Always
+    /// preceded by one <see cref="TranscriptTruncated"/> event per superseded id.
+    /// </summary>
+    public const string BargeIn = "bargein";
+
+    /// <summary>
+    /// Server to client: marks one target-lane utterance's transcript as cut short by
+    /// a later barge-in (#11) rather than having reached a natural end. Sent once per
+    /// superseded utterance, immediately before the aggregated <see cref="BargeIn"/>
+    /// event for the same barge-in - see <see cref="CascadeTranscriptTruncatedPayload"/>.
+    /// </summary>
+    public const string TranscriptTruncated = "transcript.truncated";
 }
 
 /// <summary>
@@ -316,6 +337,32 @@ public sealed record CascadeTtsAudioStartPayload(string UtteranceId, int SampleR
 /// </summary>
 /// <param name="UtteranceId">The same id the matching <see cref="CascadeMessageTypes.TtsAudioStart"/> named.</param>
 public sealed record CascadeTtsAudioEndPayload(string UtteranceId);
+
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.TranscriptTruncated"/> (#11, barge-in).
+/// </summary>
+/// <param name="UtteranceId">The target-lane utterance id (see
+/// <see cref="CascadeTranscriptPayload.UtteranceId"/> on the
+/// <see cref="CascadeTranscriptLanes.Target"/> lane) whose transcript was cut short -
+/// the same id its own <c>transcript.partial</c>/<c>transcript.final</c> events used,
+/// if it had reached either yet.</param>
+public sealed record CascadeTranscriptTruncatedPayload(string UtteranceId);
+
+/// <summary>
+/// Payload for <see cref="CascadeMessageTypes.BargeIn"/> (#11): tells the client which
+/// utterances to flush from its playback queue after a barge-in.
+/// </summary>
+/// <param name="SupersededUtteranceIds">Target-lane utterance ids (the same ids
+/// <see cref="CascadeTtsAudioStartPayload.UtteranceId"/> used) that had queued or
+/// in-flight translation/synthesis work cancelled because the speaker started a new
+/// utterance before they finished playing. Never empty - <see cref="CascadePipeline"/>
+/// only sends this event when at least one utterance was actually superseded.</param>
+/// <param name="ServerTimeMs">The moment the barge-in was detected, as milliseconds
+/// since the Unix epoch (UTC) - see <see cref="CascadeClock"/>. Mirrors the envelope's
+/// own <see cref="CascadeOutboundEnvelope.ServerTimeMs"/>, carried on the payload too
+/// so a client reading just this payload (e.g. logging it) never needs to also unwrap
+/// the envelope to know when the cancellation happened.</param>
+public sealed record CascadeBargeInPayload(IReadOnlyCollection<string> SupersededUtteranceIds, long ServerTimeMs);
 
 /// <summary>The negotiated configuration for one cascade session, taken from <see cref="CascadeSessionStartPayload"/>.</summary>
 /// <param name="SourceLang">Language tag the speaker is using.</param>

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 /// <summary>
@@ -29,7 +30,7 @@ using System.Threading.Channels;
 /// re-implementing it.
 /// </para>
 /// </remarks>
-public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
+public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInObserver, IAsyncDisposable
 {
     private readonly ITtsProvider _ttsProvider;
     private readonly ILogger<TtsCascadeObserver> _logger;
@@ -37,6 +38,43 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _pumpTask;
+
+    /// <summary>
+    /// Every target utterance id that has at least one chunk queued or in flight in
+    /// <see cref="_queue"/>/<see cref="PumpAsync"/> and has not yet reached its closing
+    /// <c>tts.audio.end</c> (#11, barge-in detection). Added the moment the first chunk
+    /// for an utterance is enqueued (<see cref="OnTranslationChunkAsync"/>), removed
+    /// once <see cref="PumpAsync"/> finishes that utterance's final chunk - whether it
+    /// finished normally or was dropped as superseded. A thread-safe set (values are
+    /// unused) because <see cref="OnBargeInAsync"/> reads it from a different task than
+    /// the one that adds to/removes from it.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, byte> _pendingUtteranceIds = new();
+
+    /// <summary>
+    /// Target utterance ids a barge-in (#11) has superseded but whose remaining queued
+    /// chunks <see cref="PumpAsync"/> has not yet drained through. Checked at the top
+    /// of every loop iteration so a phrase that was still queued - not yet dequeued -
+    /// when the barge-in happened is skipped (no synthesis call, no audio frames, no
+    /// closing <c>tts.audio.end</c>) rather than played anyway. Never cleared except by
+    /// <see cref="PumpAsync"/> itself once it reaches that utterance's final chunk, at
+    /// which point it is removed from both this set and <see cref="_pendingUtteranceIds"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, byte> _supersededUtteranceIds = new();
+
+    /// <summary>Guards <see cref="_currentPhraseCts"/> against a concurrent read from
+    /// <see cref="OnBargeInAsync"/> (a different task than <see cref="PumpAsync"/>,
+    /// which owns creating/disposing it).</summary>
+    private readonly Lock _phraseCtsLock = new();
+
+    /// <summary>
+    /// Cancellation source for whichever phrase <see cref="SynthesizePhraseAsync"/> is
+    /// currently mid-synthesis on, or <c>null</c> between phrases. A barge-in (#11)
+    /// cancels this to abort the provider stream (and any binary frames still being
+    /// sent) for a phrase that had already started before the barge-in was detected -
+    /// see <see cref="OnBargeInAsync"/>.
+    /// </summary>
+    private CancellationTokenSource? _currentPhraseCts;
 
     /// <summary>Bounded window <see cref="DisposeAsync"/> gives the pump to drain
     /// whatever was already queued before forcing it to stop - mirrors the grace
@@ -59,10 +97,37 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
     /// <inheritdoc />
     public Task OnTranslationChunkAsync(TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken)
     {
+        // Tracked from the first chunk, not just the final one, so a barge-in (#11)
+        // arriving mid-utterance already sees it as in flight - see _pendingUtteranceIds.
+        _pendingUtteranceIds.TryAdd(chunk.TargetUtteranceId, 0);
+
         // Never blocks: a slow or stuck TTS synthesis must not stall MT's own
         // transcript.* delivery to the client - see this class's remarks.
         _queue.Writer.TryWrite(new QueuedChunk(chunk, events));
         return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Cancels whichever phrase is mid-synthesis right now (if any) via
+    /// <see cref="_currentPhraseCts"/>, and marks every other utterance still pending
+    /// as superseded so <see cref="PumpAsync"/> drops their remaining queued chunks
+    /// without synthesizing or sending audio for them - see <see cref="_supersededUtteranceIds"/>.
+    /// </remarks>
+    public Task<IReadOnlyCollection<string>> OnBargeInAsync(ICascadeEventSink events, CancellationToken cancellationToken)
+    {
+        var superseded = _pendingUtteranceIds.Keys.ToArray();
+        foreach (var utteranceId in superseded)
+        {
+            _supersededUtteranceIds.TryAdd(utteranceId, 0);
+        }
+
+        lock (_phraseCtsLock)
+        {
+            _currentPhraseCts?.Cancel();
+        }
+
+        return Task.FromResult<IReadOnlyCollection<string>>(superseded);
     }
 
     /// <summary>
@@ -119,6 +184,23 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
                 firstByteMarked = false;
             }
 
+            if (_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
+            {
+                // A barge-in (#11) already cancelled this utterance before this chunk
+                // was dequeued - consume it to keep queue ordering intact, but no
+                // chunking, synthesis, or tts.audio.end for it. The client already
+                // learned this utterance was superseded from the bargein envelope
+                // OnBargeInAsync's caller sent.
+                if (chunk.IsFinal)
+                {
+                    _supersededUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+                    _pendingUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+                    currentUtteranceId = null;
+                }
+
+                continue;
+            }
+
             if (!chunk.IsFinal)
             {
                 foreach (var phrase in chunker.Append(chunk.Text))
@@ -134,15 +216,18 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
             // TranslationChunk's docs), not a further delta - appending it to the
             // chunker would double-count everything already buffered from the
             // partials above. Only the tail after the chunker's last boundary (if
-            // any) still needs synthesizing.
+            // any) still needs synthesizing - unless a barge-in cancelled the phrase
+            // this exact chunk was mid-synthesis on (see SynthesizePhraseAsync's own
+            // cancellation handling), in which case _supersededUtteranceIds now
+            // carries this utterance even though the check above already passed.
             var remainder = chunker.Flush();
-            if (!string.IsNullOrEmpty(remainder))
+            if (!string.IsNullOrEmpty(remainder) && !_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
             {
                 (startSent, firstByteMarked) =
                     await SynthesizePhraseAsync(remainder, chunk, events, startSent, firstByteMarked, cancellationToken);
             }
 
-            if (startSent)
+            if (startSent && !_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
             {
                 await events.SendEventAsync(
                     CascadeMessageTypes.TtsAudioEnd, new CascadeTtsAudioEndPayload(chunk.TargetUtteranceId), cancellationToken);
@@ -150,6 +235,8 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
                     chunk.SourceUtteranceId, CascadeLatencyStages.TtsEnd, events, _logger, cancellationToken);
             }
 
+            _supersededUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+            _pendingUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
             currentUtteranceId = null;
         }
     }
@@ -164,7 +251,11 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
     /// provider, if this utterance hasn't already had one. A synthesis failure is
     /// reported as an <c>error</c> event and otherwise swallowed - scoped to this one
     /// phrase, never taking down the pump or the rest of the utterance's remaining
-    /// phrases.
+    /// phrases. A barge-in (#11) cancelling this exact phrase mid-synthesis is handled
+    /// the same way - see the per-phrase <see cref="_currentPhraseCts"/> this method
+    /// creates and <see cref="OnBargeInAsync"/>'s remarks - except nothing is reported
+    /// to the client here: the aggregated <c>bargein</c> envelope
+    /// <c>CascadePipeline.HandleBargeInAsync</c> sends already covers it.
     /// </summary>
     /// <returns>
     /// Whether <c>tts.audio.start</c> and the <c>ttsFirstByte</c> mark have now been
@@ -190,10 +281,28 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
             startAlreadySent = true;
         }
 
+        // Linked (not the bare pump-level cancellationToken) so OnBargeInAsync can
+        // cancel just this one phrase's synthesis without also tearing down the pump
+        // task itself - session-level cancellation still propagates through the link.
+        CancellationTokenSource phraseCts;
+        lock (_phraseCtsLock)
+        {
+            phraseCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _currentPhraseCts = phraseCts;
+        }
+
         try
         {
+            if (_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
+            {
+                // Narrows the race between PumpAsync's own superseded check (just
+                // before calling this method) and a barge-in landing in that same
+                // instant - cheap to re-check here since nothing has been awaited yet.
+                return (startAlreadySent, firstByteAlreadyMarked);
+            }
+
             var request = new TtsRequest(chunk.TargetUtteranceId, phraseText, chunk.TargetLang);
-            await foreach (var audioChunk in _ttsProvider.SynthesizeAsync(request, cancellationToken))
+            await foreach (var audioChunk in _ttsProvider.SynthesizeAsync(request, phraseCts.Token))
             {
                 if (!firstByteAlreadyMarked)
                 {
@@ -202,8 +311,19 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
                         chunk.SourceUtteranceId, CascadeLatencyStages.TtsFirstByte, events, _logger, cancellationToken);
                 }
 
-                await events.SendBinaryAsync(audioChunk.Pcm, cancellationToken);
+                await events.SendBinaryAsync(audioChunk.Pcm, phraseCts.Token);
             }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A barge-in (#11) cancelled just this phrase, not the whole session/pump
+            // (that case is allowed to propagate via the exception filter above, same
+            // as before #11, so DisposeAsync's drain-timeout mechanism still works).
+            // The bargein envelope CascadePipeline sends already tells the client to
+            // flush whatever of this utterance's audio it buffered - nothing further
+            // to report here.
+            _logger.LogDebug(
+                "Text-to-speech synthesis for utterance {UtteranceId} cancelled by a barge-in.", chunk.TargetUtteranceId);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -212,6 +332,18 @@ public sealed class TtsCascadeObserver : ITranslationObserver, IAsyncDisposable
                 CascadeMessageTypes.Error,
                 new CascadeErrorPayload("Text-to-speech failed for one utterance."),
                 cancellationToken);
+        }
+        finally
+        {
+            lock (_phraseCtsLock)
+            {
+                if (ReferenceEquals(_currentPhraseCts, phraseCts))
+                {
+                    _currentPhraseCts = null;
+                }
+            }
+
+            phraseCts.Dispose();
         }
 
         return (startAlreadySent, firstByteAlreadyMarked);

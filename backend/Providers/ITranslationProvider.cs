@@ -81,6 +81,38 @@ public interface ITranslationObserver
 }
 
 /// <summary>
+/// Optional capability a <see cref="ITranslationObserver"/> can implement to react to a
+/// barge-in (#11): the speaker starting a new utterance while this observer may still
+/// have queued or in-flight downstream work for an earlier, unfinished one.
+/// <see cref="TtsCascadeObserver"/> is the only implementer today - cancelling whatever
+/// phrase it is mid-synthesis on and dropping any phrases still queued behind it for a
+/// superseded utterance - but any later per-utterance background stage can opt in the
+/// same way <see cref="IAsyncDisposable"/> already lets an observer hook session
+/// teardown without <see cref="CascadePipeline"/> needing to know it exists (see
+/// <c>CascadePipeline.DisposeObserversAsync</c> for that pattern).
+/// </summary>
+public interface ICascadeBargeInObserver
+{
+    /// <summary>
+    /// Called once per detected barge-in (#11): a speech-onset signal arrived while
+    /// this observer may still have work in flight for one or more earlier utterances.
+    /// Implementations should cancel any in-flight per-utterance work immediately (so
+    /// no further audio/text for a superseded utterance is produced after this
+    /// returns) and report exactly which utterances that affected.
+    /// </summary>
+    /// <param name="events">Sink for any events the observer wants to push - unused by
+    /// today's implementer; <see cref="CascadePipeline"/> sends the aggregated
+    /// <see cref="CascadeMessageTypes.BargeIn"/> event itself once every observer has
+    /// reported back.</param>
+    /// <param name="cancellationToken">Propagates session cancellation.</param>
+    /// <returns>The target-lane utterance ids (see <see cref="TranslationChunk.TargetUtteranceId"/>)
+    /// this observer just cancelled in-flight work for or dropped queued work for.
+    /// Empty if nothing was in flight - a barge-in signal with nothing to cancel must
+    /// not be reported as having superseded anything.</returns>
+    Task<IReadOnlyCollection<string>> OnBargeInAsync(ICascadeEventSink events, CancellationToken cancellationToken);
+}
+
+/// <summary>
 /// Thrown when an <see cref="ITranslationProvider"/> fails to translate one utterance -
 /// missing credentials, the provider rejecting the request, or the connection dropping
 /// mid-stream. Unlike STT's split between "couldn't start" and "failed mid-stream"

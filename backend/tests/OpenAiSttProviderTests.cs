@@ -155,19 +155,18 @@ public class OpenAiSttProviderTests
     }
 
     /// <summary>
-    /// Confirms VAD lifecycle events with no item_id yet (speech_started/speech_stopped,
-    /// which precede the commit that assigns one) produce no segment at all - there is
-    /// nothing to key a transcript update or a latency mark by from these alone.
+    /// Confirms speech_stopped - which just means the speaker paused, needing no
+    /// reaction on its own - produces no segment at all, unlike speech_started (#11,
+    /// barge-in detection; see the sibling test below).
     /// </summary>
     [Fact]
-    public async Task ReadSegmentsAsync_IgnoresSpeechStartedAndStoppedEvents()
+    public async Task ReadSegmentsAsync_IgnoresSpeechStoppedEvent()
     {
         var socketFactory = new FakeRealtimeSocketFactory();
         var provider = CreateProvider(socketFactory, apiKey: "sk-test");
         var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
         var socket = socketFactory.CreatedSockets[0];
 
-        socket.EnqueueIncoming("""{"type":"input_audio_buffer.speech_started"}""");
         socket.EnqueueIncoming("""{"type":"input_audio_buffer.speech_stopped"}""");
         socket.EnqueueIncoming(null);
 
@@ -178,6 +177,39 @@ public class OpenAiSttProviderTests
         }
 
         Assert.Empty(segments);
+    }
+
+    /// <summary>
+    /// Confirms an <c>input_audio_buffer.speech_started</c> event - OpenAI's VAD
+    /// detecting the speaker beginning a new utterance, before any item_id is assigned -
+    /// is surfaced as a speech-start marker segment rather than silently dropped. This
+    /// is the earliest signal CascadePipeline's barge-in detection (#11) has to work
+    /// with; losing it here would mean a mid-playback interruption never gets detected
+    /// at all.
+    /// </summary>
+    [Fact]
+    public async Task ReadSegmentsAsync_ParsesSpeechStartedEvent_IntoSpeechStartMarker()
+    {
+        var socketFactory = new FakeRealtimeSocketFactory();
+        var provider = CreateProvider(socketFactory, apiKey: "sk-test");
+        var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
+        var socket = socketFactory.CreatedSockets[0];
+
+        socket.EnqueueIncoming("""{"type":"input_audio_buffer.speech_started"}""");
+        socket.EnqueueIncoming(null);
+
+        var segments = new List<SttSegment>();
+        await foreach (var segment in stream.ReadSegmentsAsync(CancellationToken.None))
+        {
+            segments.Add(segment);
+        }
+
+        var marker = Assert.Single(segments);
+        Assert.True(marker.IsSpeechStartMarker);
+        Assert.False(marker.IsSpeechEndMarker);
+        Assert.Equal(string.Empty, marker.UtteranceId);
+        Assert.Equal(string.Empty, marker.Text);
+        Assert.False(marker.IsFinal);
     }
 
     private static OpenAiSttProvider CreateProvider(IRealtimeSocketFactory socketFactory, string? apiKey)

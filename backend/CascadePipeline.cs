@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Threading.Channels;
@@ -40,6 +41,21 @@ public sealed class CascadePipeline(
     /// awaits within that single background task.
     /// </summary>
     private readonly HashSet<string> _firstPartialMarked = [];
+
+    /// <summary>
+    /// Every source utterance id with a finalized segment currently queued in
+    /// <see cref="_translationQueue"/> or actively being translated, mapped to a
+    /// cancellation source scoped to that one utterance's translation (#11, barge-in
+    /// detection). <see cref="PumpSegmentsAsync"/> adds an entry the moment it queues a
+    /// segment for translation; <see cref="TranslateSegmentAsync"/> removes it once
+    /// that translation finishes, fails, or is itself cancelled. A
+    /// <see cref="ConcurrentDictionary{TKey,TValue}"/> because those two additions/removals
+    /// happen from different background tasks (the segment pump and the translation
+    /// pump respectively), while <see cref="HandleBargeInAsync"/> - called from the
+    /// segment pump's own task - iterates and cancels every entry still present the
+    /// instant a new speech-onset marker arrives.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlightMt = new();
 
     private ISttStream? _sttStream;
     private Task? _segmentPumpTask;
@@ -141,6 +157,15 @@ public sealed class CascadePipeline(
             }
         }
 
+        // Anything still queued when the translation pump stopped (rather than having
+        // reached TranslateSegmentAsync's own cleanup) never got its _inFlightMt entry
+        // disposed - clean those up now instead of leaking a CancellationTokenSource
+        // per utterance that happened to still be queued at session end.
+        foreach (var sourceUtteranceId in _inFlightMt.Keys.ToArray())
+        {
+            RemoveInFlightMt(sourceUtteranceId);
+        }
+
         if (_sttStream is not null)
         {
             await _sttStream.DisposeAsync();
@@ -191,6 +216,8 @@ public sealed class CascadePipeline(
     /// <see cref="CascadeLatencyStages.SttFinal"/> latency marks (#10) - a leading
     /// <see cref="SttSegment.SpeechEnd"/> marker segment produces only the speechEnd
     /// mark (no transcript event, no observer notification, no translation queueing).
+    /// A leading <see cref="SttSegment.SpeechStart"/> marker (#11, barge-in) is handled
+    /// the same way: no transcript event, just a call to <see cref="HandleBargeInAsync"/>.
     /// </summary>
     private async Task PumpSegmentsAsync(ISttStream stream, ICascadeEventSink events, CancellationToken cancellationToken)
     {
@@ -198,6 +225,12 @@ public sealed class CascadePipeline(
         {
             await foreach (var segment in stream.ReadSegmentsAsync(cancellationToken))
             {
+                if (segment.IsSpeechStartMarker)
+                {
+                    await HandleBargeInAsync(events, cancellationToken);
+                    continue;
+                }
+
                 if (segment.IsSpeechEndMarker)
                 {
                     await CascadeLatencyMarks.EmitAsync(
@@ -238,6 +271,12 @@ public sealed class CascadePipeline(
 
                 if (segment.IsFinal && !string.IsNullOrWhiteSpace(segment.Text))
                 {
+                    // Registered before the write below, not after, so a barge-in
+                    // marker arriving for the very next segment (read by this same
+                    // loop, immediately after this iteration) can never race ahead of
+                    // HandleBargeInAsync seeing this utterance as in flight (#11).
+                    _inFlightMt[segment.UtteranceId] = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
                     // Non-blocking: queueing a finalized segment for translation must
                     // never stall this loop from reading the next STT segment - see
                     // PumpTranslationsAsync's remarks for why translation runs on its
@@ -301,6 +340,14 @@ public sealed class CascadePipeline(
     /// <c>UtteranceId</c> - not the derived target-lane id - so every stage's mark for
     /// this utterance shares one key.
     /// </summary>
+    /// <remarks>
+    /// A barge-in (#11) may have already cancelled - or may cancel while this method is
+    /// running - the <see cref="_inFlightMt"/> entry for <paramref name="segment"/>. That
+    /// surfaces as <paramref name="cancellationToken"/> itself staying uncancelled while
+    /// the per-utterance token this method actually awaits on is cancelled; distinguishing
+    /// the two is exactly how this method tells "superseded by a barge-in - drop it
+    /// quietly" apart from "the whole session is tearing down - propagate as before".
+    /// </remarks>
     private async Task TranslateSegmentAsync(SttSegment segment, ICascadeEventSink events, CancellationToken cancellationToken)
     {
         // Derived from, but distinct from, the source utterance id: the shared
@@ -308,13 +355,27 @@ public sealed class CascadePipeline(
         // the source id here would collide the target-lane text into the already-final
         // source entry instead of opening its own column entry.
         var targetUtteranceId = $"{segment.UtteranceId}-target";
+
+        // Falls back to the session-level token if, somehow, no entry was registered
+        // (defensive only - PumpSegmentsAsync always registers one before queueing).
+        var translationToken = _inFlightMt.TryGetValue(segment.UtteranceId, out var uttCts) ? uttCts.Token : cancellationToken;
+
+        if (translationToken.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            // A barge-in (#11) superseded this utterance before its translation ever
+            // started - HandleBargeInAsync already sent its transcript.truncated and
+            // the aggregated bargein envelope. Never call the provider for it at all.
+            RemoveInFlightMt(segment.UtteranceId);
+            return;
+        }
+
         var translatedText = new StringBuilder();
         var firstTokenMarked = false;
 
         try
         {
             var request = new TranslationRequest(segment.Text, _config!.SourceLang, _config.TargetLang);
-            await foreach (var token in translationProvider.TranslateAsync(request, cancellationToken))
+            await foreach (var token in translationProvider.TranslateAsync(request, translationToken))
             {
                 if (token.Length == 0)
                 {
@@ -340,6 +401,18 @@ public sealed class CascadePipeline(
                     cancellationToken);
             }
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A barge-in (#11) cancelled this utterance's translation mid-stream, not a
+            // session teardown (that case falls through to PumpTranslationsAsync's own
+            // catch, unchanged from before #11). Whatever partials already reached the
+            // target lane above stay there - HandleBargeInAsync's transcript.truncated
+            // event is what tells the client this utterance won't get a proper final.
+            logger.LogDebug(
+                "Machine translation for utterance {UtteranceId} cancelled by a barge-in.", segment.UtteranceId);
+            RemoveInFlightMt(segment.UtteranceId);
+            return;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "Machine translation failed for utterance {UtteranceId}.", segment.UtteranceId);
@@ -347,6 +420,7 @@ public sealed class CascadePipeline(
                 CascadeMessageTypes.Error,
                 new CascadeErrorPayload("Machine translation failed for one utterance."),
                 cancellationToken);
+            RemoveInFlightMt(segment.UtteranceId);
             return;
         }
 
@@ -360,6 +434,89 @@ public sealed class CascadePipeline(
             new TranslationChunk(segment.UtteranceId, targetUtteranceId, finalText, IsFinal: true, _config.TargetLang),
             events,
             cancellationToken);
+        RemoveInFlightMt(segment.UtteranceId);
+    }
+
+    /// <summary>
+    /// Removes and disposes <paramref name="utteranceId"/>'s <see cref="_inFlightMt"/>
+    /// entry, if still present - called from every exit path of
+    /// <see cref="TranslateSegmentAsync"/> (success, failure, or barge-in cancellation)
+    /// so a finished utterance's cancellation source is never left around for a later
+    /// barge-in to needlessly try to cancel again.
+    /// </summary>
+    /// <param name="utteranceId">The source utterance id whose entry to remove.</param>
+    private void RemoveInFlightMt(string utteranceId)
+    {
+        if (_inFlightMt.TryRemove(utteranceId, out var cts))
+        {
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Reacts to a speech-onset signal (#11, barge-in): cancels every utterance this
+    /// pipeline still has queued or in-flight in machine translation (see
+    /// <see cref="_inFlightMt"/>), then asks every registered
+    /// <see cref="ICascadeBargeInObserver"/> (in practice, <c>TtsCascadeObserver</c>) to
+    /// do the same for its own queued/in-flight text-to-speech work. The utterance
+    /// currently starting - the one whose speech-onset just triggered this call - is
+    /// never among the cancelled ones: it has no finalized segment yet, so it was never
+    /// added to <see cref="_inFlightMt"/> or handed to any observer in the first place.
+    /// Sends one <see cref="CascadeMessageTypes.TranscriptTruncated"/> event per
+    /// superseded utterance, then one aggregated <see cref="CascadeMessageTypes.BargeIn"/>
+    /// event - but only if at least one utterance was actually superseded, so a
+    /// speech-onset signal arriving with nothing in flight produces no events at all.
+    /// </summary>
+    private async Task HandleBargeInAsync(ICascadeEventSink events, CancellationToken cancellationToken)
+    {
+        var superseded = new HashSet<string>();
+
+        foreach (var sourceUtteranceId in _inFlightMt.Keys.ToArray())
+        {
+            if (_inFlightMt.TryRemove(sourceUtteranceId, out var uttCts))
+            {
+                uttCts.Cancel();
+                uttCts.Dispose();
+                superseded.Add($"{sourceUtteranceId}-target");
+            }
+        }
+
+        foreach (var observer in translationObservers)
+        {
+            if (observer is not ICascadeBargeInObserver bargeInObserver)
+            {
+                continue;
+            }
+
+            try
+            {
+                foreach (var targetUtteranceId in await bargeInObserver.OnBargeInAsync(events, cancellationToken))
+                {
+                    superseded.Add(targetUtteranceId);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Mirrors every other observer failure isolation in this class (see
+                // NotifyTranslationObserversAsync) - one misbehaving observer must not
+                // stop the barge-in signal from still being handled/reported for the rest.
+                logger.LogError(ex, "Barge-in observer threw while cancelling in-flight work.");
+            }
+        }
+
+        if (superseded.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var targetUtteranceId in superseded)
+        {
+            await events.SendEventAsync(
+                CascadeMessageTypes.TranscriptTruncated, new CascadeTranscriptTruncatedPayload(targetUtteranceId), cancellationToken);
+        }
+
+        await events.SendEventAsync(
+            CascadeMessageTypes.BargeIn, new CascadeBargeInPayload(superseded, CascadeClock.UtcNowMs()), cancellationToken);
     }
 
     private async Task NotifyTranslationObserversAsync(
