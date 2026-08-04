@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useSyncExternalStore } from 'react';
+import { AudioPlaybackQueue } from './AudioPlaybackQueue';
 import { CascadeSessionController } from './CascadeSessionController';
 import { mapCascadeEventToTranscriptUpdate } from './cascadeTranscriptAdapter';
 import type { CascadeSessionState } from './types';
@@ -39,11 +40,22 @@ export interface UseCascadeSessionResult extends CascadeSessionState {
  * via `cascadeTranscriptAdapter` + `transcriptReducer`; `transcriptEntries`
  * resets to empty every time `start()` is called, so a new session doesn't
  * show stale text from the previous one.
+ *
+ * Also owns an `AudioPlaybackQueue`, fed by `controller.subscribeToAudio`,
+ * which plays the target-lane TTS (Text-to-Speech) audio for each utterance
+ * as it streams in (issue #7). The queue is stopped alongside the
+ * controller — both on an explicit `stop()` and on unmount — so leaving the
+ * page or hitting Stop mid-utterance silences audio immediately rather than
+ * letting already-scheduled chunks keep playing out.
  */
 export function useCascadeSession(): UseCascadeSessionResult {
   const controllerRef = useRef<CascadeSessionController | null>(null);
   controllerRef.current ??= new CascadeSessionController();
   const controller = controllerRef.current;
+
+  const playbackQueueRef = useRef<AudioPlaybackQueue | null>(null);
+  playbackQueueRef.current ??= new AudioPlaybackQueue();
+  const playbackQueue = playbackQueueRef.current;
 
   const state = useSyncExternalStore(
     (onStoreChange) => controller.subscribe(() => onStoreChange()),
@@ -60,8 +72,15 @@ export function useCascadeSession(): UseCascadeSessionResult {
   }, [controller]);
 
   useEffect(() => {
-    return () => controller.stop();
-  }, [controller]);
+    return controller.subscribeToAudio((event) => playbackQueue.handleEvent(event));
+  }, [controller, playbackQueue]);
+
+  useEffect(() => {
+    return () => {
+      controller.stop();
+      void playbackQueue.stop();
+    };
+  }, [controller, playbackQueue]);
 
   return {
     ...state,
@@ -70,6 +89,9 @@ export function useCascadeSession(): UseCascadeSessionResult {
       dispatchTranscript({ kind: 'reset' });
       void controller.start();
     },
-    stop: () => controller.stop(),
+    stop: () => {
+      controller.stop();
+      void playbackQueue.stop();
+    },
   };
 }

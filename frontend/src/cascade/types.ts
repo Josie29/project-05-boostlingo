@@ -39,6 +39,20 @@ export const CascadeMessageType = {
   TranscriptPartial: 'transcript.partial',
   /** Server to client: the settled transcript text for one utterance. */
   TranscriptFinal: 'transcript.final',
+  /**
+   * Server to client: opens the binary-audio window for one utterance's
+   * synthesized speech; the raw PCM16 frames that follow (until the matching
+   * `TtsAudioEnd`) belong to `payload.utteranceId`. See
+   * {@link CascadeTtsAudioStartPayload}.
+   */
+  TtsAudioStart: 'tts.audio.start',
+  /**
+   * Server to client: closes the binary-audio window opened by the matching
+   * `TtsAudioStart` — no more raw PCM16 frames for that utterance will
+   * arrive. Not every utterance gets a start/end pair (e.g. empty MT output).
+   * See {@link CascadeTtsAudioEndPayload}.
+   */
+  TtsAudioEnd: 'tts.audio.end',
 } as const;
 
 /** Payload the server echoes on `session.ready`, matching `CascadeSessionReadyPayload`. */
@@ -65,4 +79,23 @@ export interface CascadeTranscriptPayload {
   lane: string;
   text: string;
   timestampMs: number;
+}
+
+/**
+ * Payload the server sends on `tts.audio.start`, matching
+ * `CascadeTtsAudioStartPayload` (`backend/CascadeAudioSession.cs`). Echoes
+ * the audio format so the client never has to hardcode it, even though in
+ * practice it's always 24kHz/pcm16/mono (OpenAI TTS's native output format)
+ * and won't change mid-session.
+ */
+export interface CascadeTtsAudioStartPayload {
+  utteranceId: string;
+  sampleRateHz: number;
+  encoding: string;
+  channels: number;
+}
+
+/** Payload the server sends on `tts.audio.end`, matching `CascadeTtsAudioEndPayload`. */
+export interface CascadeTtsAudioEndPayload {
+  utteranceId: string;
 }

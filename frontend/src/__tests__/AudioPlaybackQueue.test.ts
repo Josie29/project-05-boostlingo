@@ -1,0 +1,256 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AudioPlaybackQueue } from '../cascade/AudioPlaybackQueue';
+import type { AudioPlaybackQueueDeps } from '../cascade/AudioPlaybackQueue';
+
+/** A fake `AudioBufferSourceNode` covering just the surface `AudioPlaybackQueue` touches. */
+interface FakeSource {
+  buffer: unknown;
+  onended: (() => void) | null;
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+}
+
+/** A fake `AudioBuffer` covering just the surface `AudioPlaybackQueue` touches. */
+interface FakeBuffer {
+  numberOfChannels: number;
+  length: number;
+  sampleRate: number;
+  duration: number;
+  copyToChannel: ReturnType<typeof vi.fn>;
+}
+
+/**
+ * The surface `AudioPlaybackQueue` actually touches on an `AudioContext` —
+ * a standalone type (not `AudioContext & {...}`) so `currentTime` stays
+ * mutable here instead of inheriting the real DOM type's `readonly`, the
+ * same trick `CascadeSessionController.test.ts`'s `FakeWebSocket` uses for
+ * `readyState`. Cast to `AudioContext` via {@link toAudioContext} wherever
+ * the real type is required.
+ */
+interface FakeAudioContext {
+  currentTime: number;
+  destination: object;
+  createBuffer: ReturnType<typeof vi.fn>;
+  createBufferSource: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+}
+
+function toAudioContext(ctx: FakeAudioContext): AudioContext {
+  return ctx as unknown as AudioContext;
+}
+
+/**
+ * A fake `AudioContext` whose `currentTime` a test can move forward by hand
+ * (simulating real playback time passing) since jsdom implements no real
+ * Web Audio API. `createBufferSource()` records every source it creates so
+ * tests can assert on the exact `start(when)` time each was scheduled at.
+ */
+function fakeAudioContext(startingCurrentTime = 0) {
+  const sources: FakeSource[] = [];
+  const buffers: FakeBuffer[] = [];
+
+  const ctx: FakeAudioContext = {
+    currentTime: startingCurrentTime,
+    destination: {},
+    createBuffer: vi.fn((numberOfChannels: number, length: number, sampleRate: number): FakeBuffer => {
+      const buffer: FakeBuffer = { numberOfChannels, length, sampleRate, duration: length / sampleRate, copyToChannel: vi.fn() };
+      buffers.push(buffer);
+      return buffer;
+    }),
+    createBufferSource: vi.fn((): FakeSource => {
+      const source: FakeSource = {
+        buffer: null,
+        onended: null,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
+      };
+      sources.push(source);
+      return source;
+    }),
+    close: vi.fn(async () => {}),
+  };
+
+  return { ctx, sources, buffers };
+}
+
+/** Builds a silent raw PCM16LE chunk of `sampleCount` samples, at 24kHz that's `sampleCount / 24000` seconds. */
+function pcmChunkOf(sampleCount: number): ArrayBuffer {
+  return new ArrayBuffer(sampleCount * 2);
+}
+
+function buildQueue(overrides: Partial<AudioPlaybackQueueDeps> = {}) {
+  const { ctx, sources, buffers } = fakeAudioContext();
+  const queue = new AudioPlaybackQueue({ createAudioContext: () => toAudioContext(ctx), ...overrides });
+  return { queue, ctx, sources, buffers };
+}
+
+describe('AudioPlaybackQueue', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Catches the bug this queue exists to prevent: if the first chunk waited
+  // for anything other than "now," there'd be a dead-air delay before TTS
+  // audio starts, even though the spec calls for starting playback as soon
+  // as the first chunk arrives.
+  it('starts the first chunk immediately at the AudioContext current time', () => {
+    const { queue, ctx, sources } = buildQueue();
+    ctx.currentTime = 2.5;
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+    expect(sources).toHaveLength(1);
+    expect(sources[0].start).toHaveBeenCalledWith(2.5);
+  });
+
+  // Catches the core scheduling bug: back-to-back chunks must butt up
+  // exactly against each other (no silent gap, no overlapping/garbled
+  // audio) — this is what "gapless playback" means in practice. If the
+  // cursor advanced by the wrong amount, every multi-chunk utterance would
+  // either stutter (gaps) or sound broken (overlap).
+  it('schedules each subsequent chunk exactly when the previous one ends, with no gap or overlap', () => {
+    const { queue, sources } = buildQueue();
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) }); // 1.0s
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(12_000) }); // 0.5s
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(6_000) }); // 0.25s
+
+    expect(sources[0].start).toHaveBeenCalledWith(0);
+    expect(sources[1].start).toHaveBeenCalledWith(1);
+    expect(sources[2].start).toHaveBeenCalledWith(1.5);
+  });
+
+  // Catches a "starts in the past" bug: if a chunk arrives late (e.g. the
+  // network stalled) after everything already scheduled has finished
+  // playing, the cursor is behind the AudioContext's clock. Scheduling
+  // against the stale cursor would either throw (Web Audio clamps `start`
+  // to "now" but a naive cursor-only implementation might not) or silently
+  // desync playback timing for every chunk after it.
+  it('resumes at the current time (accepting a gap) rather than the stale cursor when the queue has run dry', () => {
+    const { queue, ctx, sources } = buildQueue();
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) }); // scheduled [0, 1)
+    expect(sources[0].start).toHaveBeenCalledWith(0);
+
+    // Real playback time moves well past when the first chunk finished —
+    // simulating a stall before the next chunk arrives.
+    ctx.currentTime = 5;
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+    expect(sources[1].start).toHaveBeenCalledWith(5);
+  });
+
+  // Catches an endianness/scale bug in the capture->schedule pipeline: if
+  // the PCM16LE bytes were decoded incorrectly before being handed to the
+  // AudioBuffer, every utterance would play back as static/noise instead of
+  // speech, with nothing in the transcript UI hinting at the problem.
+  it("decodes each chunk's PCM16LE bytes into the exact Float32 samples handed to the AudioBuffer", () => {
+    const { queue, buffers } = buildQueue();
+    const chunk = new ArrayBuffer(4);
+    new DataView(chunk).setInt16(0, 32767, true);
+    new DataView(chunk).setInt16(2, -32768, true);
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: chunk });
+
+    expect(buffers[0].sampleRate).toBe(24_000);
+    const decoded = buffers[0].copyToChannel.mock.calls[0][0] as Float32Array;
+    expect(decoded[0]).toBe(1);
+    expect(decoded[1]).toBe(-1);
+  });
+
+  // Catches a crash bug: an utterance with no synthesizable text (per the
+  // backend's documented "not every utterance gets audio" behavior) sends
+  // no chunks at all — a chunk handler must never assume it's been called at
+  // least once. Also guards against a zero-length frame (defensive; the
+  // protocol says "zero or more" binary frames) crashing Web Audio, which
+  // rejects zero-length AudioBuffers.
+  it('does not schedule anything for a zero-length chunk', () => {
+    const { queue, sources } = buildQueue();
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: new ArrayBuffer(0) });
+    queue.handleEvent({ kind: 'end', utteranceId: 'u1' });
+
+    expect(sources).toHaveLength(0);
+  });
+
+  // Catches the teardown bug this issue calls out explicitly: stopping a
+  // session with audio still scheduled must silence it immediately, not let
+  // already-scheduled sources keep playing out — a real annoyance for a
+  // user who hits Stop mid-sentence expecting instant silence.
+  it('stop() stops and disconnects every still-active source and closes the AudioContext', async () => {
+    const { queue, ctx, sources } = buildQueue();
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+    await queue.stop();
+
+    for (const source of sources) {
+      expect(source.stop).toHaveBeenCalledOnce();
+      expect(source.disconnect).toHaveBeenCalledOnce();
+    }
+    expect(ctx.close).toHaveBeenCalledOnce();
+  });
+
+  // Catches an accumulation/leak bug: repeated start/stop cycles (the normal
+  // usage pattern — a user can start and stop a session many times) must
+  // each close their own AudioContext and open a fresh one next time,
+  // mirroring `MicPcmCapture`'s stop()/restart pattern, rather than reusing
+  // a closed context (which would throw on every subsequent call) or
+  // leaking one context per cycle.
+  it('opens a fresh AudioContext on the next chunk after stop() closed the previous one', async () => {
+    const contexts = [fakeAudioContext(), fakeAudioContext()];
+    let call = 0;
+    const queue = new AudioPlaybackQueue({ createAudioContext: () => toAudioContext(contexts[call++].ctx) });
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+    await queue.stop();
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u2', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u2', data: pcmChunkOf(24_000) });
+    await queue.stop();
+
+    expect(contexts[0].ctx.close).toHaveBeenCalledOnce();
+    expect(contexts[1].ctx.close).toHaveBeenCalledOnce();
+    // The second utterance's chunk started at its own fresh context's time
+    // (0), not carrying forward the first context's cursor — proof the two
+    // sessions are fully independent rather than sharing leaked state.
+    expect(contexts[1].sources[0].start).toHaveBeenCalledWith(0);
+  });
+
+  // Catches a double-stop crash: a source that already finished playing on
+  // its own (browser fires `onended`, our handler removes it from the
+  // active set) must not be stopped again when `stop()` runs — and even if
+  // the browser itself throws calling `.stop()` on an already-stopped node,
+  // that must not stop `stop()` from finishing its cleanup (closing the
+  // context) for every other source.
+  it('does not throw if a source throws on stop(), and still closes the AudioContext', async () => {
+    const { queue, ctx, sources } = buildQueue();
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+    sources[0].stop.mockImplementation(() => {
+      throw new Error('InvalidStateError: already stopped');
+    });
+
+    await expect(queue.stop()).resolves.toBeUndefined();
+    expect(ctx.close).toHaveBeenCalledOnce();
+  });
+
+  // Catches a no-op-should-be-safe bug: stopping a queue that never received
+  // any audio (e.g. a session where every utterance's MT/TTS failed) must
+  // not try to close an AudioContext that was never created.
+  it('stop() is a no-op that does not throw when no audio was ever scheduled', async () => {
+    const queue = new AudioPlaybackQueue({ createAudioContext: () => toAudioContext(fakeAudioContext().ctx) });
+    await expect(queue.stop()).resolves.toBeUndefined();
+  });
+});

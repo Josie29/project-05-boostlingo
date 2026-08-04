@@ -13,13 +13,16 @@ const STATUS_LABEL: Record<CascadeSessionStatus, string> = {
 /**
  * Start/Stop control for a Cascade (STT -> MT -> TTS) interpreter session.
  * Hardcodes English -> Spanish for now — per-session language selection is
- * issue #8. Renders the live STT transcript in the source column as soon as
- * it arrives (issue #5); target-column machine translation/TTS playback
- * arrive with issues #6-7.
+ * issue #8. Renders the live STT transcript in the source column and the
+ * live MT (Machine Translation) transcript in the target column as soon as
+ * each arrives (issues #5-6); the target lane's synthesized speech plays
+ * back automatically through `useCascadeSession`'s `AudioPlaybackQueue` as
+ * soon as audio for an utterance starts streaming in (issue #7) — nothing
+ * to render for that, since it's just sound.
  *
- * Contains no transport logic itself — all WebSocket/AudioWorklet state
- * lives in `useCascadeSession`, mirroring `RealtimeSessionPanel`'s shape so
- * the two modes are easy to compare side by side.
+ * Contains no transport logic itself — all WebSocket/AudioWorklet/Web Audio
+ * state lives in `useCascadeSession`, mirroring `RealtimeSessionPanel`'s
+ * shape so the two modes are easy to compare side by side.
  */
 export function CascadeSessionPanel() {
   const { status, errorMessage, start, stop, transcriptEntries } = useCascadeSession();
