@@ -1,22 +1,24 @@
 import { useState } from 'react';
 import { BackendStatus } from './components/BackendStatus';
 import { LanguagePairSelector } from './components/LanguagePairSelector';
-import { RealtimeSessionPanel } from './components/RealtimeSessionPanel';
-import { CascadeSessionPanel } from './components/CascadeSessionPanel';
+import { SessionPanel } from './components/SessionPanel';
+import { isLiveStatus } from './session/InterpreterSession';
+import { useInterpreterSession } from './session/useInterpreterSession';
 import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from './api';
 import './App.css';
 
 /**
  * App shell for the AI Interpreter Workbench. Owns the shared source/target
- * language pair (issue #8) so both the Realtime and Cascade panels always
- * negotiate the same pair on their next Start, and disables the selector
- * while either panel reports an active session — changing languages
- * mid-session is deliberately out of scope for this issue.
+ * language pair (issue #8) so whichever transport is active always
+ * negotiates the same pair on its next Start, and disables the selector
+ * while a session is live or a mode switch is in flight — changing
+ * languages mid-session remains out of scope (issue #9 only formalizes
+ * switching *transports* mid-session, not languages).
  */
 function App() {
   const [pair, setPair] = useState<LanguagePair>(DEFAULT_LANGUAGE_PAIR);
-  const [isRealtimeActive, setIsRealtimeActive] = useState(false);
-  const [isCascadeActive, setIsCascadeActive] = useState(false);
+  const session = useInterpreterSession(pair);
+  const isActive = isLiveStatus(session.status) || session.switching;
 
   return (
     <div className="app-shell">
@@ -29,13 +31,17 @@ function App() {
 
       <main className="app-shell__main">
         <BackendStatus />
-        <LanguagePairSelector
-          pair={pair}
-          onChange={setPair}
-          disabled={isRealtimeActive || isCascadeActive}
+        <LanguagePairSelector pair={pair} onChange={setPair} disabled={isActive} />
+        <SessionPanel
+          mode={session.mode}
+          status={session.status}
+          errorMessage={session.errorMessage}
+          switching={session.switching}
+          transcriptEntries={session.transcriptEntries}
+          onModeChange={session.setMode}
+          onStart={session.start}
+          onStop={session.stop}
         />
-        <RealtimeSessionPanel pair={pair} onActiveChange={setIsRealtimeActive} />
-        <CascadeSessionPanel pair={pair} onActiveChange={setIsCascadeActive} />
         <p className="app-shell__placeholder">Latency instrumentation lands here.</p>
       </main>
     </div>
