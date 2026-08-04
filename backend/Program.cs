@@ -1,5 +1,14 @@
 var builder = WebApplication.CreateBuilder(args);
 
+// Typed HttpClient for minting ephemeral OpenAI Realtime client secrets. The
+// OPENAI_API_KEY itself is attached per-request inside OpenAiRealtimeSessionClient
+// and never exposed to callers of /api/realtime/session.
+builder.Services.AddHttpClient<IRealtimeSessionClient, OpenAiRealtimeSessionClient>(client =>
+{
+    client.BaseAddress = new Uri("https://api.openai.com/v1/realtime/");
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+
 var app = builder.Build();
 
 // Enables WebSocket upgrade requests on this host. No endpoints use it yet;
@@ -7,6 +16,8 @@ var app = builder.Build();
 app.UseWebSockets();
 
 app.MapGet("/healthz", () => Results.Ok(new HealthResponse("ok")));
+
+app.MapRealtimeSessionEndpoints();
 
 LogOpenAiKeyStatus(app.Configuration, app.Logger);
 
