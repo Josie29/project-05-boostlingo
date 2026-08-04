@@ -9,15 +9,19 @@ builder.Services.AddHttpClient<IRealtimeSessionClient, OpenAiRealtimeSessionClie
     client.Timeout = TimeSpan.FromSeconds(15);
 });
 
+// The cascade pipeline stub until #5-7 (STT/MT/TTS) land behind ICascadePipeline.
+builder.Services.AddSingleton<ICascadePipeline, NoOpCascadePipeline>();
+
 var app = builder.Build();
 
-// Enables WebSocket upgrade requests on this host. No endpoints use it yet;
-// the cascade audio channel (#4) and any realtime relay wire up on top of this.
+// Enables WebSocket upgrade requests on this host, used by the cascade audio
+// channel (#4) mapped below and any future realtime relay.
 app.UseWebSockets();
 
 app.MapGet("/healthz", () => Results.Ok(new HealthResponse("ok")));
 
 app.MapRealtimeSessionEndpoints();
+app.MapCascadeAudioEndpoints();
 
 LogOpenAiKeyStatus(app.Configuration, app.Logger);
 
