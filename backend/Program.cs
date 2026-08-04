@@ -15,10 +15,20 @@ builder.Services.AddHttpClient<IRealtimeSessionClient, OpenAiRealtimeSessionClie
 builder.Services.AddSingleton<IRealtimeSocketFactory, ClientWebSocketRealtimeSocketFactory>();
 builder.Services.AddSingleton<ISttProvider, OpenAiSttProvider>();
 
-// The real cascade pipeline (STT live; MT/TTS land behind the same ICascadePipeline in
-// #6-7). Scoped, not singleton: CascadePipeline holds per-session mutable state (the
-// open STT stream and its draining task), and ASP.NET Core gives each WebSocket
-// upgrade request its own DI scope for the lifetime of the connection.
+// MT (machine translation; #6) provider. Typed HttpClient, same pattern as
+// IRealtimeSessionClient above - OPENAI_API_KEY is attached per-request inside
+// OpenAiTranslationProvider and never exposed to callers of ITranslationProvider.
+builder.Services.AddHttpClient<ITranslationProvider, OpenAiTranslationProvider>(client =>
+{
+    client.BaseAddress = new Uri("https://api.openai.com/v1/");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+// The real cascade pipeline (STT and MT live; TTS lands behind the same
+// ICascadePipeline in #7). Scoped, not singleton: CascadePipeline holds per-session
+// mutable state (the open STT stream and the background tasks draining it and the
+// translation queue), and ASP.NET Core gives each WebSocket upgrade request its own DI
+// scope for the lifetime of the connection.
 builder.Services.AddScoped<ICascadePipeline, CascadePipeline>();
 
 var app = builder.Build();
