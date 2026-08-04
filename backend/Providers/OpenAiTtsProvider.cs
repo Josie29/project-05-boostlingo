@@ -30,10 +30,12 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
     /// before the rest of the utterance has finished translating.</summary>
     public const string Model = "gpt-4o-mini-tts";
 
-    /// <summary>Fixed voice for every cascade session. Not yet configurable per session -
-    /// language pair selection (#8) may revisit this, but nothing in this issue's scope
-    /// calls for per-user voice choice.</summary>
-    public const string Voice = "alloy";
+    /// <summary>Voice used when <see cref="TtsRequest.TargetLang"/> isn't in the language
+    /// registry - should not happen in practice, since <see cref="CascadeAudioSession"/>
+    /// validates the pair against the same registry before a session ever starts, but
+    /// keeps this provider from throwing on an unrecognized language rather than simply
+    /// picking a reasonable fallback voice.</summary>
+    public const string DefaultVoice = "alloy";
 
     /// <summary>Size of each read from the response body stream, and therefore the
     /// approximate size of each <see cref="TtsAudioChunk"/> this provider yields.</summary>
@@ -119,10 +121,20 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
         return httpRequest;
     }
 
+    /// <summary>
+    /// Picks the voice to synthesize with from the language registry's entry for
+    /// <see cref="TtsRequest.TargetLang"/> (see <see cref="LanguageInfo.TtsVoice"/>) -
+    /// this is the one place a language pair (#8) actually changes which voice speaks,
+    /// since a cascade session's target language is fixed for its whole duration
+    /// (unlike realtime mode's bidirectional single voice; see
+    /// <see cref="RealtimeInterpreterSession.Voice"/>).
+    /// </summary>
+    private static string ResolveVoice(string targetLang) => Languages.Find(targetLang)?.TtsVoice ?? DefaultVoice;
+
     private static OpenAiSpeechRequest BuildSpeechRequest(TtsRequest request) => new(
         Model: Model,
         Input: request.Text,
-        Voice: Voice,
+        Voice: ResolveVoice(request.TargetLang),
         ResponseFormat: "pcm",
         StreamFormat: "audio");
 }

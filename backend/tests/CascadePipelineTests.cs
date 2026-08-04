@@ -5,6 +5,27 @@ namespace Boostlingo.Backend.Tests;
 public class CascadePipelineTests
 {
     /// <summary>
+    /// Confirms the session's negotiated source language - not a hardcoded default -
+    /// reaches the STT provider as its language hint, and that hint is looked up from
+    /// the language registry rather than passed through as some other value. Without
+    /// this, a Spanish -> English cascade session could silently transcribe with the
+    /// wrong (or a fixed) language hint.
+    /// </summary>
+    [Fact]
+    public async Task OnSessionStartedAsync_PassesRegistryLanguageHint_ForNegotiatedSourceLang()
+    {
+        var stream = new FakeSttStream();
+        var provider = new FakeSttProvider(stream);
+        var pipeline = CreatePipeline(provider);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("es", "en"), sink, CancellationToken.None);
+
+        Assert.NotNull(provider.LastConfig);
+        Assert.Equal(Languages.Find("es")!.SttLanguageHint, provider.LastConfig!.SourceLang);
+    }
+
+    /// <summary>
     /// Confirms audio chunks handed to the pipeline actually reach the STT provider's
     /// stream - without this, the provider never sees any speech to transcribe.
     /// </summary>
@@ -435,10 +456,17 @@ file sealed class LaneSplitEventReader
 /// <summary>A controllable <see cref="ISttProvider"/> - either fails to start, or hands back a <see cref="FakeSttStream"/>.</summary>
 file sealed class FakeSttProvider(FakeSttStream? stream = null, Exception? startException = null) : ISttProvider
 {
-    public Task<ISttStream> StartStreamAsync(SttStreamConfig config, CancellationToken cancellationToken) =>
-        startException is not null
+    /// <summary>The config the pipeline most recently started a stream with, so tests can
+    /// assert the negotiated language actually reached the provider.</summary>
+    public SttStreamConfig? LastConfig { get; private set; }
+
+    public Task<ISttStream> StartStreamAsync(SttStreamConfig config, CancellationToken cancellationToken)
+    {
+        LastConfig = config;
+        return startException is not null
             ? throw startException
             : Task.FromResult<ISttStream>(stream!);
+    }
 }
 
 /// <summary>

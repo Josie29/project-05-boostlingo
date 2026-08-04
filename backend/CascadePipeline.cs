@@ -50,9 +50,17 @@ public sealed class CascadePipeline(
     {
         _config = config;
 
+        // Looked up from the language registry (rather than passing config.SourceLang
+        // straight through) so a provider whose language hint differs from the wire
+        // code (see LanguageInfo.SttLanguageHint) picks up that difference for free -
+        // CascadeAudioSession.HandleSessionStartAsync already validated config.SourceLang
+        // against the same registry before this method is ever called, but the fallback
+        // below still guards a direct caller (e.g. a unit test) that skips that step.
+        var sttLanguageHint = Languages.Find(config.SourceLang)?.SttLanguageHint ?? config.SourceLang;
+
         try
         {
-            _sttStream = await sttProvider.StartStreamAsync(new SttStreamConfig(config.SourceLang), cancellationToken);
+            _sttStream = await sttProvider.StartStreamAsync(new SttStreamConfig(sttLanguageHint), cancellationToken);
         }
         catch (SttProviderUnavailableException ex)
         {

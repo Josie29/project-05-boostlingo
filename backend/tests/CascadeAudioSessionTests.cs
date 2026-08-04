@@ -89,6 +89,29 @@ public class CascadeAudioSessionTests
     }
 
     /// <summary>
+    /// Confirms session.start with a language pair outside the registry gets a JSON
+    /// error event back and never reaches the pipeline - the same guardrail the
+    /// realtime endpoint enforces, applied to cascade mode's own handshake, so an
+    /// unsupported language can't silently start burning STT/MT/TTS provider calls.
+    /// </summary>
+    [Fact]
+    public async Task SessionStart_UnsupportedLanguagePair_ReceivesErrorEvent_AndNeverStartsPipeline()
+    {
+        var fakePipeline = new FakeCascadePipeline();
+        using var factory = new CascadeTestFactory(fakePipeline);
+        using var socket = await ConnectAsync(factory.Server);
+
+        await SendTextAsync(socket, """{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"fr"}}""");
+        var envelope = await ReceiveEnvelopeAsync(socket);
+
+        Assert.Equal("error", envelope.RootElement.GetProperty("type").GetString());
+        Assert.Equal(WebSocketState.Open, socket.State);
+        Assert.Null(fakePipeline.StartedConfig);
+
+        await CloseAsync(socket);
+    }
+
+    /// <summary>
     /// Confirms an unparseable control frame gets a JSON error event back instead of
     /// silently dropping the message or tearing down the whole connection.
     /// </summary>

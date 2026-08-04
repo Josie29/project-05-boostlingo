@@ -53,10 +53,10 @@ public class OpenAiTtsProviderTests
     }
 
     /// <summary>
-    /// Confirms the outgoing request names gpt-4o-mini-tts, a fixed voice, PCM
-    /// (Pulse Code Modulation) streaming output, and carries the phrase text plus a
-    /// bearer-authenticated header - the entire contract for "swapping the TTS
-    /// provider only touches the provider class."
+    /// Confirms the outgoing request names gpt-4o-mini-tts, the registry's voice for
+    /// the request's target language, PCM (Pulse Code Modulation) streaming output, and
+    /// carries the phrase text plus a bearer-authenticated header - the entire contract
+    /// for "swapping the TTS provider only touches the provider class."
     /// </summary>
     [Fact]
     public async Task SynthesizeAsync_SendsSpeechRequest_WithModelVoiceAndFormat()
@@ -71,9 +71,54 @@ public class OpenAiTtsProviderTests
         var request = Assert.Single(handler.Requests);
         Assert.Equal("Bearer sk-test", request.Authorization);
         Assert.Contains(OpenAiTtsProvider.Model, request.Body);
-        Assert.Contains(OpenAiTtsProvider.Voice, request.Body);
+        Assert.Contains(Languages.Find("es")!.TtsVoice, request.Body);
         Assert.Contains("\"response_format\":\"pcm\"", request.Body);
         Assert.Contains("Hola mundo", request.Body);
+    }
+
+    /// <summary>
+    /// Confirms the voice actually changes with the target language - not just that
+    /// some voice is present - proving the language pair (#8) drives TTS voice choice
+    /// via the registry rather than a single voice hardcoded regardless of direction.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_DifferentTargetLang_SelectsDifferentVoice()
+    {
+        var handlerEs = new FakeChunkedAudioHttpMessageHandler([1]);
+        var providerEs = CreateProvider(handlerEs, apiKey: "sk-test");
+        await foreach (var _ in providerEs.SynthesizeAsync(new TtsRequest("utt-1", "Hola", "es"), CancellationToken.None))
+        {
+        }
+
+        var handlerEn = new FakeChunkedAudioHttpMessageHandler([1]);
+        var providerEn = CreateProvider(handlerEn, apiKey: "sk-test");
+        await foreach (var _ in providerEn.SynthesizeAsync(new TtsRequest("utt-1", "Hello", "en"), CancellationToken.None))
+        {
+        }
+
+        var esVoice = Languages.Find("es")!.TtsVoice;
+        var enVoice = Languages.Find("en")!.TtsVoice;
+        Assert.NotEqual(esVoice, enVoice);
+        Assert.Contains(esVoice, Assert.Single(handlerEs.Requests).Body);
+        Assert.Contains(enVoice, Assert.Single(handlerEn.Requests).Body);
+    }
+
+    /// <summary>
+    /// Confirms an unrecognized target language (should never happen once
+    /// CascadeAudioSession's registry validation is in place, but the provider guards
+    /// against it independently) falls back to a default voice instead of throwing.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_UnrecognizedTargetLang_FallsBackToDefaultVoice()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler([1]);
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        await foreach (var _ in provider.SynthesizeAsync(new TtsRequest("utt-1", "Bonjour", "fr"), CancellationToken.None))
+        {
+        }
+
+        Assert.Contains(OpenAiTtsProvider.DefaultVoice, Assert.Single(handler.Requests).Body);
     }
 
     /// <summary>

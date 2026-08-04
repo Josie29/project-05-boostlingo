@@ -497,6 +497,18 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
             return;
         }
 
+        if (!Languages.IsSupportedPair(start.SourceLang, start.TargetLang))
+        {
+            logger.LogWarning(
+                "Cascade session {SessionId} rejected unsupported language pair '{SourceLang}' -> '{TargetLang}'.",
+                _sessionId,
+                start.SourceLang,
+                start.TargetLang);
+            await TrySendErrorAsync(
+                $"Unsupported language pair '{start.SourceLang}' -> '{start.TargetLang}'.", cancellationToken);
+            return;
+        }
+
         logger.LogInformation(
             "Cascade session {SessionId} started: {SourceLang} -> {TargetLang}.",
             _sessionId,

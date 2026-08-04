@@ -55,6 +55,7 @@ app.UseWebSockets();
 
 app.MapGet("/healthz", () => Results.Ok(new HealthResponse("ok")));
 
+app.MapLanguageEndpoints();
 app.MapRealtimeSessionEndpoints();
 app.MapCascadeAudioEndpoints();
 
