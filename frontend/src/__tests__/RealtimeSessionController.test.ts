@@ -257,6 +257,30 @@ describe('RealtimeSessionController', () => {
     expect(events).toEqual([payload]);
   });
 
+  // Catches the core wiring bug issue #8 is about: a language pair selected in the UI
+  // that never reaches the token request would silently negotiate the backend's en/es
+  // default no matter what a listener actually picked.
+  it('forwards the given language pair to fetchSessionInfo', async () => {
+    const deps = buildDeps();
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start({ sourceLang: 'es', targetLang: 'en' });
+
+    expect(deps.fetchSessionInfo).toHaveBeenCalledWith({ sourceLang: 'es', targetLang: 'en' });
+  });
+
+  // Catches a regression where start() would always pass some pair (even an implicit
+  // default) instead of leaving it to the backend's own en/es default when the caller
+  // hasn't made an explicit selection.
+  it('calls fetchSessionInfo with undefined when no pair is given', async () => {
+    const deps = buildDeps();
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+
+    expect(deps.fetchSessionInfo).toHaveBeenCalledWith(undefined);
+  });
+
   // Catches a crash bug: a malformed data-channel frame (not valid JSON) must not
   // throw out of the onmessage handler and take the whole session down.
   it('does not throw and does not notify subscribers when a data-channel message is malformed', async () => {

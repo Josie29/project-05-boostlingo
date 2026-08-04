@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { useCascadeSession } from '../cascade/useCascadeSession';
 import type { CascadeSessionStatus } from '../cascade/types';
+import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
 import { TranscriptPanel } from './TranscriptPanel';
 
 const STATUS_LABEL: Record<CascadeSessionStatus, string> = {
@@ -10,10 +12,18 @@ const STATUS_LABEL: Record<CascadeSessionStatus, string> = {
   error: 'Error',
 };
 
+export interface CascadeSessionPanelProps {
+  /** Source/target pair to negotiate on Start (issue #8); falls back to the backend's own en -> es default if omitted. */
+  pair?: LanguagePair;
+  /** Called whenever this panel's session becomes active/inactive, so a shared language selector can disable itself mid-session. */
+  onActiveChange?: (active: boolean) => void;
+}
+
 /**
  * Start/Stop control for a Cascade (STT -> MT -> TTS) interpreter session.
- * Hardcodes English -> Spanish for now — per-session language selection is
- * issue #8. Renders the live STT transcript in the source column and the
+ * Negotiates whatever source/target pair the shared `LanguagePairSelector`
+ * has selected (issue #8), defaulting to English -> Spanish if none was
+ * passed in. Renders the live STT transcript in the source column and the
  * live MT (Machine Translation) transcript in the target column as soon as
  * each arrives (issues #5-6); the target lane's synthesized speech plays
  * back automatically through `useCascadeSession`'s `AudioPlaybackQueue` as
@@ -24,11 +34,15 @@ const STATUS_LABEL: Record<CascadeSessionStatus, string> = {
  * state lives in `useCascadeSession`, mirroring `RealtimeSessionPanel`'s
  * shape so the two modes are easy to compare side by side.
  */
-export function CascadeSessionPanel() {
-  const { status, errorMessage, start, stop, transcriptEntries } = useCascadeSession();
+export function CascadeSessionPanel({ pair = DEFAULT_LANGUAGE_PAIR, onActiveChange }: CascadeSessionPanelProps = {}) {
+  const { status, errorMessage, start, stop, transcriptEntries } = useCascadeSession(pair);
 
   const isBusy = status === 'requesting-mic' || status === 'connecting';
   const isConnected = status === 'connected';
+
+  useEffect(() => {
+    onActiveChange?.(isBusy || isConnected);
+  }, [isBusy, isConnected, onActiveChange]);
 
   return (
     <section className="cascade-session" aria-label="Cascade pipeline session">

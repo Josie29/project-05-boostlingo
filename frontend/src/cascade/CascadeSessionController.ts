@@ -1,5 +1,6 @@
 import type { CascadeAudioCapture } from './CascadeAudioCapture';
 import { MicPcmCapture } from './MicPcmCapture';
+import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
 import {
   CASCADE_ENVELOPE_VERSION,
   CascadeMessageType,
@@ -10,10 +11,6 @@ import {
   type CascadeTtsAudioEndPayload,
   type CascadeTtsAudioStartPayload,
 } from './types';
-
-/** Hardcoded source/target languages for now — per-session language selection is issue #8. */
-const SOURCE_LANG = 'en';
-const TARGET_LANG = 'es';
 
 /** Path the cascade audio WebSocket is served at, proxied to the backend by Vite (see `vite.config.ts`). */
 const CASCADE_WS_PATH = '/ws/cascade';
@@ -165,8 +162,12 @@ export class CascadeSessionController {
    * streaming PCM16 audio frames — nothing is ever sent before the server
    * has acknowledged the format it expects. A no-op while already
    * requesting/connecting/connected; call `stop()` first to retry from `'error'`.
+   *
+   * @param pair - Source/target language pair to send in `session.start`.
+   *   Defaults to {@link DEFAULT_LANGUAGE_PAIR} (en -> es) when omitted,
+   *   matching the backend's own default.
    */
-  async start(): Promise<void> {
+  async start(pair: LanguagePair = DEFAULT_LANGUAGE_PAIR): Promise<void> {
     if (
       this.state.status === 'requesting-mic' ||
       this.state.status === 'connecting' ||
@@ -188,7 +189,7 @@ export class CascadeSessionController {
       this.localStream = localStream;
 
       this.setState('connecting');
-      await this.connectAndStream(localStream);
+      await this.connectAndStream(localStream, pair);
       if (myGeneration !== this.generation) return;
 
       this.setState('connected');
@@ -206,7 +207,7 @@ export class CascadeSessionController {
    * capture is running; rejects on an `error` envelope, a socket error, an
    * unexpected close, or a capture-start failure — whichever comes first.
    */
-  private connectAndStream(stream: MediaStream): Promise<void> {
+  private connectAndStream(stream: MediaStream, pair: LanguagePair): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
 
@@ -233,7 +234,7 @@ export class CascadeSessionController {
           JSON.stringify({
             v: CASCADE_ENVELOPE_VERSION,
             type: CascadeMessageType.SessionStart,
-            payload: { sourceLang: SOURCE_LANG, targetLang: TARGET_LANG },
+            payload: { sourceLang: pair.sourceLang, targetLang: pair.targetLang },
           }),
         );
       };

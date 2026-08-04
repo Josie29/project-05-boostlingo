@@ -3,6 +3,7 @@ import { AudioPlaybackQueue } from './AudioPlaybackQueue';
 import { CascadeSessionController } from './CascadeSessionController';
 import { mapCascadeEventToTranscriptUpdate } from './cascadeTranscriptAdapter';
 import type { CascadeSessionState } from './types';
+import type { LanguagePair } from '../api';
 import { transcriptReducer } from '../transcript/transcriptReducer';
 import {
   INITIAL_TRANSCRIPT_STATE,
@@ -47,8 +48,13 @@ export interface UseCascadeSessionResult extends CascadeSessionState {
  * controller — both on an explicit `stop()` and on unmount — so leaving the
  * page or hitting Stop mid-utterance silences audio immediately rather than
  * letting already-scheduled chunks keep playing out.
+ *
+ * @param pair - Source/target language pair `start()` negotiates in the
+ *   `session.start` handshake (issue #8). Read fresh on every call, so
+ *   selecting a new pair before Start is pressed uses the latest choice;
+ *   changing it mid-session is out of scope here.
  */
-export function useCascadeSession(): UseCascadeSessionResult {
+export function useCascadeSession(pair?: LanguagePair): UseCascadeSessionResult {
   const controllerRef = useRef<CascadeSessionController | null>(null);
   controllerRef.current ??= new CascadeSessionController();
   const controller = controllerRef.current;
@@ -87,7 +93,7 @@ export function useCascadeSession(): UseCascadeSessionResult {
     transcriptEntries: transcriptState.entries,
     start: () => {
       dispatchTranscript({ kind: 'reset' });
-      void controller.start();
+      void controller.start(pair);
     },
     stop: () => {
       controller.stop();

@@ -132,7 +132,9 @@ describe('CascadeSessionController', () => {
     expect(states).toEqual(['idle', 'requesting-mic', 'connecting', 'connected']);
   });
 
-  it('sends session.start with the hardcoded en/es language pair once the socket opens', async () => {
+  // Confirms start() still defaults to en/es (matching the backend's own default) when
+  // the caller hasn't made an explicit language selection.
+  it('sends session.start with the default en/es language pair when none is given', async () => {
     const ws = fakeWebSocket();
     const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
     const controller = new CascadeSessionController(deps);
@@ -144,6 +146,24 @@ describe('CascadeSessionController', () => {
 
     expect(ws.send).toHaveBeenCalledWith(
       JSON.stringify({ v: 1, type: 'session.start', payload: { sourceLang: 'en', targetLang: 'es' } }),
+    );
+  });
+
+  // Catches the core wiring bug issue #8 is about: a language pair selected in the UI
+  // that never reaches session.start would silently interpret en -> es no matter what
+  // a listener actually picked (e.g. swapping to es -> en would be a no-op).
+  it('sends session.start with the given language pair once the socket opens', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+
+    const startPromise = controller.start({ sourceLang: 'es', targetLang: 'en' });
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({ v: 1, type: 'session.start', payload: { sourceLang: 'es', targetLang: 'en' } }),
     );
   });
 

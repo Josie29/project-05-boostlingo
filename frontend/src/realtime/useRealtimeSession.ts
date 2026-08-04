@@ -3,6 +3,7 @@ import { useSyncExternalStore } from 'react';
 import { RealtimeSessionController } from './RealtimeSessionController';
 import { mapRealtimeEventToTranscriptUpdate } from './realtimeTranscriptAdapter';
 import type { RealtimeSessionState } from './types';
+import type { LanguagePair } from '../api';
 import { transcriptReducer } from '../transcript/transcriptReducer';
 import {
   INITIAL_TRANSCRIPT_STATE,
@@ -40,8 +41,13 @@ export interface UseRealtimeSessionResult extends RealtimeSessionState {
  * `transcriptReducer`; `transcriptEntries` resets to empty every time
  * `start()` is called, so a new session doesn't show stale text from the
  * previous one.
+ *
+ * @param pair - Source/target language pair `start()` negotiates with the
+ *   backend (issue #8). Read fresh on every call, so selecting a new pair
+ *   before Start is pressed uses the latest choice; changing it mid-session
+ *   is out of scope here.
  */
-export function useRealtimeSession(): UseRealtimeSessionResult {
+export function useRealtimeSession(pair?: LanguagePair): UseRealtimeSessionResult {
   const controllerRef = useRef<RealtimeSessionController | null>(null);
   controllerRef.current ??= new RealtimeSessionController();
   const controller = controllerRef.current;
@@ -69,7 +75,7 @@ export function useRealtimeSession(): UseRealtimeSessionResult {
     transcriptEntries: transcriptState.entries,
     start: () => {
       dispatchTranscript({ kind: 'reset' });
-      void controller.start();
+      void controller.start(pair);
     },
     stop: () => controller.stop(),
   };

@@ -1,4 +1,4 @@
-import { createRealtimeSession, type RealtimeSessionInfo } from '../api';
+import { createRealtimeSession, type LanguagePair, type RealtimeSessionInfo } from '../api';
 import {
   INITIAL_REALTIME_SESSION_STATE,
   type RealtimeSessionState,
@@ -57,8 +57,8 @@ async function postOfferToOpenAi(offerSdp: string, session: RealtimeSessionInfo)
 
 /** Collaborators the controller needs, swappable in tests for jsdom's lack of real WebRTC/media APIs. */
 export interface RealtimeSessionControllerDeps {
-  /** Requests the ephemeral session token from the backend. */
-  fetchSessionInfo: () => Promise<RealtimeSessionInfo>;
+  /** Requests the ephemeral session token from the backend for the given language pair (the backend's own en/es default applies if omitted). */
+  fetchSessionInfo: (pair?: LanguagePair) => Promise<RealtimeSessionInfo>;
   /** Captures the local microphone. */
   getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
   /** Constructs a fresh peer connection for the session. */
@@ -69,7 +69,7 @@ export interface RealtimeSessionControllerDeps {
 
 function defaultDeps(): RealtimeSessionControllerDeps {
   return {
-    fetchSessionInfo: createRealtimeSession,
+    fetchSessionInfo: (pair) => createRealtimeSession(pair),
     getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
     createPeerConnection: () => new RTCPeerConnection(),
     postOffer: postOfferToOpenAi,
@@ -166,8 +166,12 @@ export class RealtimeSessionController {
    * Requests mic access, fetches an ephemeral token, and negotiates a WebRTC
    * session with OpenAI's Realtime API. A no-op while already
    * requesting/connecting/connected; call `stop()` first to retry from `'error'`.
+   *
+   * @param pair - Source/target language pair to negotiate for this session.
+   *   Omitted entirely (rather than defaulted here) when not given, so the
+   *   backend's own en -> es default is the single source of truth for it.
    */
-  async start(): Promise<void> {
+  async start(pair?: LanguagePair): Promise<void> {
     if (
       this.state.status === 'requesting-mic' ||
       this.state.status === 'connecting' ||
@@ -189,7 +193,7 @@ export class RealtimeSessionController {
       this.localStream = localStream;
 
       this.setState('connecting');
-      const sessionInfo = await this.deps.fetchSessionInfo();
+      const sessionInfo = await this.deps.fetchSessionInfo(pair);
       if (myGeneration !== this.generation) return;
 
       const peerConnection = this.deps.createPeerConnection();

@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { useRealtimeSession } from '../realtime/useRealtimeSession';
 import type { RealtimeSessionStatus } from '../realtime/types';
+import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
 import { TranscriptPanel } from './TranscriptPanel';
 
 const STATUS_LABEL: Record<RealtimeSessionStatus, string> = {
@@ -9,6 +11,13 @@ const STATUS_LABEL: Record<RealtimeSessionStatus, string> = {
   connected: 'Connected',
   error: 'Error',
 };
+
+export interface RealtimeSessionPanelProps {
+  /** Source/target pair to negotiate on Start (issue #8); falls back to the backend's own en -> es default if omitted. */
+  pair?: LanguagePair;
+  /** Called whenever this panel's session becomes active/inactive, so a shared language selector can disable itself mid-session. */
+  onActiveChange?: (active: boolean) => void;
+}
 
 /**
  * Start/Stop control for a Realtime (WebRTC) voice-to-voice interpreter
@@ -20,11 +29,15 @@ const STATUS_LABEL: Record<RealtimeSessionStatus, string> = {
  * `useRealtimeSession`, so this component stays swappable if cascade mode
  * (issue #4) needs a differently-wired but similarly-shaped panel.
  */
-export function RealtimeSessionPanel() {
-  const { status, errorMessage, start, stop, transcriptEntries } = useRealtimeSession();
+export function RealtimeSessionPanel({ pair = DEFAULT_LANGUAGE_PAIR, onActiveChange }: RealtimeSessionPanelProps = {}) {
+  const { status, errorMessage, start, stop, transcriptEntries } = useRealtimeSession(pair);
 
   const isBusy = status === 'requesting-mic' || status === 'connecting';
   const isConnected = status === 'connected';
+
+  useEffect(() => {
+    onActiveChange?.(isBusy || isConnected);
+  }, [isBusy, isConnected, onActiveChange]);
 
   return (
     <section className="realtime-session" aria-label="Realtime voice session">

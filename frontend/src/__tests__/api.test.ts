@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRealtimeSession } from '../api';
+import { createRealtimeSession, getLanguages } from '../api';
 
 describe('createRealtimeSession', () => {
   afterEach(() => {
@@ -66,5 +66,77 @@ describe('createRealtimeSession', () => {
     );
 
     await expect(createRealtimeSession()).rejects.toThrow('status 500');
+  });
+
+  // Catches the core wiring bug issue #8 is about: a selected language pair that never
+  // reaches the POST body would silently fall back to the backend's en/es default no
+  // matter what a listener picked in the selector.
+  it('sends the given language pair as the JSON request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ clientSecret: 'ek_abc', expiresAt: 1730000000, model: 'gpt-realtime' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createRealtimeSession({ sourceLang: 'es', targetLang: 'en' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/realtime/session',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ sourceLang: 'es', targetLang: 'en' }),
+      }),
+    );
+  });
+
+  // Catches a regression where always sending a body (even an implicit default) would
+  // break backward compatibility with the pre-issue-#8 no-body call the backend still
+  // accepts and defaults to en/es.
+  it('sends no request body when no pair is given', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ clientSecret: 'ek_abc', expiresAt: 1730000000, model: 'gpt-realtime' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createRealtimeSession();
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/realtime/session', { method: 'POST' });
+  });
+});
+
+describe('getLanguages', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Catches the bug where the selector hardcodes its options instead of rendering
+  // whatever languages the backend's registry actually reports.
+  it('returns every language from the /api/languages response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          languages: [
+            { code: 'en', displayName: 'English' },
+            { code: 'es', displayName: 'Spanish' },
+          ],
+        }),
+      }),
+    );
+
+    const result = await getLanguages();
+
+    expect(result).toEqual([
+      { code: 'en', displayName: 'English' },
+      { code: 'es', displayName: 'Spanish' },
+    ]);
+  });
+
+  it('throws when the response is not ok', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    await expect(getLanguages()).rejects.toThrow('status 500');
   });
 });
