@@ -1,4 +1,5 @@
 import { BackendStatus } from './components/BackendStatus';
+import { RealtimeSessionPanel } from './components/RealtimeSessionPanel';
 import './App.css';
 
 /**
@@ -18,8 +19,9 @@ function App() {
 
       <main className="app-shell__main">
         <BackendStatus />
+        <RealtimeSessionPanel />
         <p className="app-shell__placeholder">
-          Mode selection, transcripts, and latency instrumentation land here.
+          Transcripts and latency instrumentation land here.
         </p>
       </main>
     </div>
