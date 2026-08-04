@@ -20,9 +20,7 @@ function App() {
       <main className="app-shell__main">
         <BackendStatus />
         <RealtimeSessionPanel />
-        <p className="app-shell__placeholder">
-          Transcripts and latency instrumentation land here.
-        </p>
+        <p className="app-shell__placeholder">Latency instrumentation lands here.</p>
       </main>
     </div>
   );

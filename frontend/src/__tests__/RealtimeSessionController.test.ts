@@ -19,9 +19,22 @@ function fakeStream(tracks: MediaStreamTrack[]): MediaStream {
   return { getTracks: () => tracks } as unknown as MediaStream;
 }
 
-/** A fake RTCDataChannel that records whether close() was called. */
-function fakeDataChannel(): RTCDataChannel {
-  return { close: vi.fn() } as unknown as RTCDataChannel;
+/**
+ * A fake RTCDataChannel that records close()/send() calls and lets tests
+ * fire its onopen/onmessage handlers by hand, since jsdom doesn't implement
+ * real data channels.
+ */
+function fakeDataChannel() {
+  const channel = {
+    close: vi.fn(),
+    send: vi.fn(),
+    onopen: null as (() => void) | null,
+    onmessage: null as ((event: { data: string }) => void) | null,
+  };
+  return channel as unknown as RTCDataChannel & {
+    close: ReturnType<typeof vi.fn>;
+    send: ReturnType<typeof vi.fn>;
+  };
 }
 
 /**
@@ -206,5 +219,60 @@ describe('RealtimeSessionController', () => {
     raw.ontrack?.({ streams: [remoteStream] });
 
     expect(controller.getAudioElement().srcObject).toBe(remoteStream);
+  });
+
+  // Catches the bug where the transcript panel's source column stays empty forever
+  // because the session never actually asked OpenAI to transcribe the caller's audio.
+  it('enables input audio transcription via session.update once the data channel opens', async () => {
+    const { pc, dataChannel } = fakePeerConnection();
+    const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+    const controller = new RealtimeSessionController(deps);
+
+    await controller.start();
+    (dataChannel as unknown as { onopen: () => void }).onopen();
+
+    expect(dataChannel.send).toHaveBeenCalledOnce();
+    const sent = JSON.parse((dataChannel.send as ReturnType<typeof vi.fn>).mock.calls[0][0] as string);
+    expect(sent).toMatchObject({
+      type: 'session.update',
+      session: { audio: { input: { transcription: { model: expect.any(String) } } } },
+    });
+  });
+
+  // Catches the bug where transcript adapters never see any events because the
+  // controller parses data-channel messages but forgets to fan them out to subscribers.
+  it('forwards parsed data-channel messages to event subscribers', async () => {
+    const { pc, dataChannel } = fakePeerConnection();
+    const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+    const controller = new RealtimeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToEvents((event) => events.push(event));
+
+    await controller.start();
+    const payload = { type: 'conversation.item.input_audio_transcription.delta', item_id: 'i1', delta: 'Hi' };
+    (dataChannel as unknown as { onmessage: (event: { data: string }) => void }).onmessage({
+      data: JSON.stringify(payload),
+    });
+
+    expect(events).toEqual([payload]);
+  });
+
+  // Catches a crash bug: a malformed data-channel frame (not valid JSON) must not
+  // throw out of the onmessage handler and take the whole session down.
+  it('does not throw and does not notify subscribers when a data-channel message is malformed', async () => {
+    const { pc, dataChannel } = fakePeerConnection();
+    const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+    const controller = new RealtimeSessionController(deps);
+    const events: unknown[] = [];
+    controller.subscribeToEvents((event) => events.push(event));
+
+    await controller.start();
+    expect(() =>
+      (dataChannel as unknown as { onmessage: (event: { data: string }) => void }).onmessage({
+        data: 'not json',
+      }),
+    ).not.toThrow();
+
+    expect(events).toEqual([]);
   });
 });

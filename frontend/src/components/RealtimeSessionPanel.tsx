@@ -1,5 +1,6 @@
 import { useRealtimeSession } from '../realtime/useRealtimeSession';
 import type { RealtimeSessionStatus } from '../realtime/types';
+import { TranscriptPanel } from './TranscriptPanel';
 
 const STATUS_LABEL: Record<RealtimeSessionStatus, string> = {
   idle: 'Idle',
@@ -20,7 +21,7 @@ const STATUS_LABEL: Record<RealtimeSessionStatus, string> = {
  * (issue #4) needs a differently-wired but similarly-shaped panel.
  */
 export function RealtimeSessionPanel() {
-  const { status, errorMessage, start, stop } = useRealtimeSession();
+  const { status, errorMessage, start, stop, transcriptEntries } = useRealtimeSession();
 
   const isBusy = status === 'requesting-mic' || status === 'connecting';
   const isConnected = status === 'connected';
@@ -46,6 +47,8 @@ export function RealtimeSessionPanel() {
           Stop
         </button>
       </div>
+
+      <TranscriptPanel entries={transcriptEntries} />
     </section>
   );
 }

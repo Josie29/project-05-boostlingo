@@ -9,6 +9,29 @@ const OPENAI_REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 const DATA_CHANNEL_LABEL = 'oai-events';
 
 /**
+ * Client event sent over the data channel as soon as it opens, turning on
+ * input audio transcription for this session. The backend's session
+ * request (`backend/RealtimeSession.cs`) doesn't request this — enabling it
+ * here via `session.update` is the standard client-side approach and avoids
+ * a backend change for a frontend-only feature (issue #3's live transcript
+ * panel needs to hear back what the *caller* said, not just the
+ * interpretation).
+ */
+const ENABLE_INPUT_TRANSCRIPTION_EVENT = {
+  type: 'session.update',
+  session: {
+    type: 'realtime',
+    audio: {
+      input: {
+        transcription: {
+          model: 'gpt-4o-mini-transcribe',
+        },
+      },
+    },
+  },
+};
+
+/**
  * Posts the local SDP offer to OpenAI's Realtime calls endpoint, authenticating
  * with the ephemeral client secret, and resolves with the answer SDP.
  *
@@ -54,6 +77,8 @@ function defaultDeps(): RealtimeSessionControllerDeps {
 }
 
 type Listener = (state: RealtimeSessionState) => void;
+/** Receives one JSON-parsed event off the data channel, as-is, for adapters to interpret. */
+type EventListener = (event: unknown) => void;
 
 /**
  * Owns the WebRTC transport for a single Realtime voice session: fetching an
@@ -70,6 +95,7 @@ export class RealtimeSessionController {
   private readonly deps: RealtimeSessionControllerDeps;
   private readonly audioElement: HTMLAudioElement;
   private readonly listeners = new Set<Listener>();
+  private readonly eventListeners = new Set<EventListener>();
 
   private state: RealtimeSessionState = INITIAL_REALTIME_SESSION_STATE;
   private localStream: MediaStream | null = null;
@@ -103,9 +129,37 @@ export class RealtimeSessionController {
     };
   }
 
+  /**
+   * Subscribes to JSON-parsed events off the `oai-events` data channel
+   * (transcription deltas, response lifecycle events, etc.) — everything
+   * OpenAI sends, unfiltered. Callers (e.g. the transcript adapter) pick
+   * out what they care about. Returns an unsubscribe function.
+   */
+  subscribeToEvents(listener: EventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => {
+      this.eventListeners.delete(listener);
+    };
+  }
+
   private setState(status: RealtimeSessionStatus, errorMessage: string | null = null): void {
     this.state = { status, errorMessage };
     for (const listener of this.listeners) listener(this.state);
+  }
+
+  /**
+   * Parses one data-channel message and fans it out to event subscribers.
+   * A message that isn't valid JSON is dropped rather than thrown, since a
+   * single malformed/truncated frame shouldn't take down the whole session.
+   */
+  private handleDataChannelMessage(data: string): void {
+    let event: unknown;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      return;
+    }
+    for (const listener of this.eventListeners) listener(event);
   }
 
   /**
@@ -150,6 +204,10 @@ export class RealtimeSessionController {
       };
 
       this.dataChannel = peerConnection.createDataChannel(DATA_CHANNEL_LABEL);
+      this.dataChannel.onopen = () => {
+        this.dataChannel?.send(JSON.stringify(ENABLE_INPUT_TRANSCRIPTION_EVENT));
+      };
+      this.dataChannel.onmessage = (event: MessageEvent<string>) => this.handleDataChannelMessage(event.data);
 
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
@@ -181,6 +239,8 @@ export class RealtimeSessionController {
 
   private teardown(): void {
     if (this.dataChannel) {
+      this.dataChannel.onopen = null;
+      this.dataChannel.onmessage = null;
       this.dataChannel.close();
       this.dataChannel = null;
     }
