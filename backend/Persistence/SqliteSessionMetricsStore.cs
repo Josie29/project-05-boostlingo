@@ -71,6 +71,8 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         (string Name, string Definition)[] added =
         [
             ("stt_model", $"TEXT NOT NULL DEFAULT '{OpenAiSttProvider.Model}'"),
+            ("mt_model", $"TEXT NOT NULL DEFAULT '{OpenAiTranslationProvider.Model}'"),
+            ("tts_model", $"TEXT NOT NULL DEFAULT '{OpenAiTtsProvider.Model}'"),
             ("kind", "TEXT NOT NULL DEFAULT 'live'"),
             ("wer", "REAL NULL"),
             ("fixture", "TEXT NULL"),
@@ -101,6 +103,8 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             started_at_ms INTEGER NOT NULL,
             ended_at_ms INTEGER NOT NULL,
             stt_model TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+            mt_model TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+            tts_model TEXT NOT NULL DEFAULT 'gpt-4o-mini-tts',
             kind TEXT NOT NULL DEFAULT 'live',
             wer REAL NULL,
             fixture TEXT NULL,
@@ -138,7 +142,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
 
     /// <inheritdoc />
     public async Task SaveConversationAsync(
-        ConversationMetricsReport report, string translationProvider, string sttModel, CancellationToken cancellationToken)
+        ConversationMetricsReport report, ResolvedStageConfig stageConfig, CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -169,17 +173,22 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         {
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, kind, baseline)
-                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, 'live', $baseline)
+                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, mt_model, tts_model, kind, baseline, wer, fixture)
+                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, $mtModel, $ttsModel, $kind, $baseline, $wer, $fixture)
                 """;
+            insert.Parameters.AddWithValue("$kind", report.Kind ?? "live");
             insert.Parameters.AddWithValue("$baseline", wasBaseline ? 1 : 0);
+            insert.Parameters.AddWithValue("$wer", (object?)report.Wer ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$fixture", (object?)report.Fixture ?? DBNull.Value);
             insert.Parameters.AddWithValue("$id", report.ConversationId);
             insert.Parameters.AddWithValue("$sourceLang", report.SourceLang);
             insert.Parameters.AddWithValue("$targetLang", report.TargetLang);
-            insert.Parameters.AddWithValue("$translationProvider", translationProvider);
+            insert.Parameters.AddWithValue("$translationProvider", stageConfig.TranslationProvider);
             insert.Parameters.AddWithValue("$startedAtMs", report.StartedAtMs);
             insert.Parameters.AddWithValue("$endedAtMs", report.EndedAtMs);
-            insert.Parameters.AddWithValue("$sttModel", sttModel);
+            insert.Parameters.AddWithValue("$sttModel", stageConfig.SttModel);
+            insert.Parameters.AddWithValue("$mtModel", stageConfig.MtModel);
+            insert.Parameters.AddWithValue("$ttsModel", stageConfig.TtsModel);
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -268,7 +277,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
                 c.id, c.source_lang, c.target_lang, c.translation_provider, c.started_at_ms, c.ended_at_ms,
                 COUNT(CASE WHEN u.mode = 'realtime' THEN 1 END) AS realtime_count,
                 COUNT(CASE WHEN u.mode = 'cascade' THEN 1 END) AS cascade_count,
-                c.stt_model, c.kind, c.wer, c.baseline
+                c.stt_model, c.mt_model, c.tts_model, c.kind, c.wer, c.baseline
             FROM conversations c
             LEFT JOIN utterances u ON u.conversation_id = c.id
             GROUP BY c.id
@@ -290,11 +299,13 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
                 RealtimeUtteranceCount: listReader.GetInt32(6),
                 CascadeUtteranceCount: listReader.GetInt32(7),
                 SttModel: listReader.GetString(8),
-                Kind: listReader.GetString(9),
-                Wer: listReader.IsDBNull(10) ? null : listReader.GetDouble(10),
+                MtModel: listReader.GetString(9),
+                TtsModel: listReader.GetString(10),
+                Kind: listReader.GetString(11),
+                Wer: listReader.IsDBNull(12) ? null : listReader.GetDouble(12),
                 RealtimeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "realtime"),
                 CascadeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "cascade"),
-                Baseline: listReader.GetInt64(11) != 0));
+                Baseline: listReader.GetInt64(13) != 0));
         }
 
         return listings;

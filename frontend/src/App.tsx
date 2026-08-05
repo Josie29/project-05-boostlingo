@@ -96,7 +96,7 @@ function App() {
           onDismissNotice={session.dismissNotice}
         />
         </div>
-        {view === 'lab' && <LabPanel />}
+        {view === 'lab' && <LabPanel pair={pair} stageModels={stageModels} />}
       </main>
     </div>
   );

@@ -42,7 +42,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task SavedConversation_IsListedWithProviderAndPerModeCounts()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport(), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var listings = await store.ListConversationsAsync(CancellationToken.None);
 
@@ -76,12 +76,29 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                 new UtteranceMetricsRecord("realtime:d", InterpreterMode.Realtime, 900, []),
             ],
         };
-        await store.SaveConversationAsync(report, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(report, new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var listing = Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
 
         Assert.Equal(2000, listing.CascadeEndToEndMedianMs);
         Assert.Equal(900, listing.RealtimeEndToEndMedianMs);
+    }
+
+    /// <summary>
+    /// Catches an experiment run (Lab P3) losing its identity on the way to the Lab
+    /// table: kind, WER, and fixture must round-trip through save and listing.
+    /// </summary>
+    [Fact]
+    public async Task ExperimentRun_RoundTripsKindWerAndFixture()
+    {
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        var report = SampleReport() with { Kind = "experiment", Wer = 0.061, Fixture = "benchmark-en-es.wav" };
+        await store.SaveConversationAsync(report, new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
+
+        var listing = Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
+
+        Assert.Equal("experiment", listing.Kind);
+        Assert.Equal(0.061, listing.Wer);
     }
 
     /// <summary>
@@ -93,8 +110,8 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task Summary_CollapsingProviders_MergesCascadeIntoOneGroup()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport("conv-openai"), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
-        await store.SaveConversationAsync(SampleReport("conv-anthropic"), "anthropic", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-openai"), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-anthropic"), new ResolvedStageConfig("anthropic", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var summary = await store.GetSummaryAsync(CancellationToken.None, collapseMtProvider: true);
 
@@ -113,12 +130,12 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task Baseline_PinReplacesPreviousSet_AndScopesSummaries()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport("conv-early"), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-early"), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
         var later = SampleReport("conv-later") with
         {
             Utterances = [new UtteranceMetricsRecord("cascade:x", InterpreterMode.Cascade, 1000, [])],
         };
-        await store.SaveConversationAsync(later, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(later, new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         await store.SetBaselineAsync(["conv-early"], CancellationToken.None);
         await store.SetBaselineAsync(["conv-later"], CancellationToken.None);
@@ -141,10 +158,10 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task ResavingBaselineConversation_KeepsItPinned()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport(), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
         await store.SetBaselineAsync(["conv-1"], CancellationToken.None);
 
-        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport(), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         Assert.True(Assert.Single(await store.ListConversationsAsync(CancellationToken.None)).Baseline);
     }
@@ -187,7 +204,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task ResavingSameConversation_ReplacesInsteadOfDuplicating()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport(), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var updated = SampleReport() with
         {
@@ -198,7 +215,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                     Stages: [new StageTimingRecord("sttFinal", 500)]),
             ],
         };
-        await store.SaveConversationAsync(updated, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(updated, new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var listing = Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
         Assert.Equal(1, listing.CascadeUtteranceCount);
@@ -220,8 +237,8 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task Summary_GroupsCascadeByProvider_AndCollapsesRealtime()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport("conv-openai"), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
-        await store.SaveConversationAsync(SampleReport("conv-anthropic"), "anthropic", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-openai"), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-anthropic"), new ResolvedStageConfig("anthropic", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var summary = await store.GetSummaryAsync(CancellationToken.None);
 
@@ -263,7 +280,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                         Stages: [new StageTimingRecord("sttFinal", i * 100)]),
                 ],
                 Transcript: []);
-            await store.SaveConversationAsync(report, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+            await store.SaveConversationAsync(report, new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
         }
 
         var summary = await store.GetSummaryAsync(CancellationToken.None);
@@ -305,7 +322,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                     Stages: [new StageTimingRecord("sttFinal", 500)]),
             ],
             Transcript: []);
-        await store.SaveConversationAsync(report, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(report, new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"), CancellationToken.None);
 
         var summary = await store.GetSummaryAsync(CancellationToken.None);
 

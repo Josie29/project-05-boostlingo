@@ -14,13 +14,12 @@ public interface ISessionMetricsStore
     /// be idempotent rather than duplicating rows.
     /// </summary>
     /// <param name="report">The conversation to save.</param>
-    /// <param name="translationProvider">The effective MT (machine translation)
-    /// provider for this conversation - the session's own pick, or the process
-    /// default when it didn't pick (resolved by the endpoint).</param>
-    /// <param name="sttModel">The effective STT model, resolved the same way.</param>
+    /// <param name="stageConfig">The effective per-stage config for this conversation,
+    /// resolved by the endpoint (session picks over process defaults; the realtime
+    /// model across all stages for a realtime-only conversation).</param>
     /// <param name="cancellationToken">Cancels the save.</param>
     Task SaveConversationAsync(
-        ConversationMetricsReport report, string translationProvider, string sttModel, CancellationToken cancellationToken);
+        ConversationMetricsReport report, ResolvedStageConfig stageConfig, CancellationToken cancellationToken);
 
     /// <summary>Lists every stored conversation, most recently started first.</summary>
     /// <param name="cancellationToken">Cancels the query.</param>

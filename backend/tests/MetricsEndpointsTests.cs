@@ -112,6 +112,55 @@ public class MetricsEndpointsTests : IDisposable
     }
 
     /// <summary>
+    /// Catches the Lab table claiming models that never ran: a cascade run on the
+    /// anthropic provider must stamp the anthropic MT model, and a realtime-only
+    /// conversation must stamp the realtime model for every stage (one model handles
+    /// its whole pipeline).
+    /// </summary>
+    [Fact]
+    public async Task SavedConversations_StampEffectiveStageModels()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        var anthropicRun = new
+        {
+            conversationId = "conv-anthropic",
+            sourceLang = "en",
+            targetLang = "es",
+            startedAtMs = 2_000L,
+            endedAtMs = 3_000L,
+            mtProvider = "anthropic",
+            utterances = new object[] { new { utteranceId = "cascade:a", mode = "cascade", endToEndMs = 1000.0, stages = Array.Empty<object>() } },
+            transcript = Array.Empty<object>(),
+        };
+        var realtimeRun = new
+        {
+            conversationId = "conv-rt",
+            sourceLang = "en",
+            targetLang = "es",
+            startedAtMs = 1_000L,
+            endedAtMs = 2_000L,
+            utterances = new object[] { new { utteranceId = "realtime:a", mode = "realtime", endToEndMs = 900.0, stages = Array.Empty<object>() } },
+            transcript = Array.Empty<object>(),
+        };
+        await client.PostAsJsonAsync(MetricsEndpoints.ConversationsRoute, anthropicRun);
+        await client.PostAsJsonAsync(MetricsEndpoints.ConversationsRoute, realtimeRun);
+
+        var conversations = (await client.GetFromJsonAsync<JsonElement>(MetricsEndpoints.ConversationsRoute))
+            .GetProperty("conversations").EnumerateArray().ToList();
+
+        var anthropic = Assert.Single(conversations, c => c.GetProperty("conversationId").GetString() == "conv-anthropic");
+        Assert.Equal(AnthropicTranslationProvider.DefaultModel, anthropic.GetProperty("mtModel").GetString());
+        Assert.Equal(OpenAiTtsProvider.Model, anthropic.GetProperty("ttsModel").GetString());
+
+        var realtime = Assert.Single(conversations, c => c.GetProperty("conversationId").GetString() == "conv-rt");
+        Assert.Equal(RealtimeInterpreterSession.Model, realtime.GetProperty("sttModel").GetString());
+        Assert.Equal(RealtimeInterpreterSession.Model, realtime.GetProperty("mtModel").GetString());
+        Assert.Equal(RealtimeInterpreterSession.Model, realtime.GetProperty("ttsModel").GetString());
+    }
+
+    /// <summary>
     /// Catches the progress pane's whole loop breaking over the wire: pinning a
     /// baseline must mark the listing row and scope the summary; an unknown scope
     /// value must 400 rather than silently returning everything.

@@ -160,6 +160,12 @@ export interface ConversationMetricsPayload {
   sttModel?: string;
   /** The session's MT provider pick, omitted for the default. */
   mtProvider?: string;
+  /** `'experiment'` for a fixture replay run (Lab P3); omitted means live. */
+  kind?: 'live' | 'experiment';
+  /** Word Error Rate against the run's ground truth; omitted for live sessions. */
+  wer?: number;
+  /** Name of the replayed fixture; omitted for live sessions. */
+  fixture?: string;
 }
 
 /** One stored conversation, as returned by `GET /api/metrics/conversations` — a Lab table row. */
@@ -173,6 +179,8 @@ export interface ConversationListing {
   realtimeUtteranceCount: number;
   cascadeUtteranceCount: number;
   sttModel: string;
+  mtModel: string;
+  ttsModel: string;
   kind: string;
   wer: number | null;
   realtimeEndToEndMedianMs: number | null;

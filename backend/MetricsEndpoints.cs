@@ -38,6 +38,7 @@ public static class MetricsEndpoints
         ConversationMetricsReport report,
         ISessionMetricsStore store,
         TranslationProviderName translationProvider,
+        IConfiguration configuration,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(report.ConversationId))
@@ -70,12 +71,47 @@ public static class MetricsEndpoints
             return Results.BadRequest(new MetricsErrorResponse($"Unsupported MT provider '{report.MtProvider}'."));
         }
 
+        if (report.Kind is not (null or "live" or "experiment"))
+        {
+            return Results.BadRequest(new MetricsErrorResponse($"Unsupported kind '{report.Kind}'. Valid values: live, experiment."));
+        }
+
+        if (report.Wer is < 0)
+        {
+            return Results.BadRequest(new MetricsErrorResponse("wer must be non-negative."));
+        }
+
         await store.SaveConversationAsync(
-            report,
-            report.MtProvider ?? translationProvider.Value,
-            report.SttModel ?? StageModels.SttModels[0],
-            cancellationToken);
+            report, ResolveStageConfig(report, translationProvider.Value, configuration), cancellationToken);
         return Results.NoContent();
+    }
+
+    /// <summary>
+    /// Resolves the effective per-stage models this conversation ran: session picks
+    /// over process defaults. A realtime-only conversation stamps the realtime model
+    /// for every stage — one model handles the whole pipeline there, and stamping the
+    /// cascade defaults would claim models that never ran.
+    /// </summary>
+    private static ResolvedStageConfig ResolveStageConfig(
+        ConversationMetricsReport report, string defaultProvider, IConfiguration configuration)
+    {
+        var realtimeOnly =
+            report.Utterances.Count > 0 && report.Utterances.All(utterance => utterance.Mode == InterpreterMode.Realtime);
+        if (realtimeOnly)
+        {
+            return new ResolvedStageConfig(
+                defaultProvider,
+                RealtimeInterpreterSession.Model,
+                RealtimeInterpreterSession.Model,
+                RealtimeInterpreterSession.Model);
+        }
+
+        var provider = report.MtProvider ?? defaultProvider;
+        var mtModel = provider == "anthropic"
+            ? (configuration["ANTHROPIC_MT_MODEL"] is { Length: > 0 } overridden ? overridden : AnthropicTranslationProvider.DefaultModel)
+            : OpenAiTranslationProvider.Model;
+        return new ResolvedStageConfig(
+            provider, report.SttModel ?? StageModels.SttModels[0], mtModel, OpenAiTtsProvider.Model);
     }
 
     /// <summary>Lists every stored conversation, most recently started first.</summary>

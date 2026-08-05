@@ -13,6 +13,8 @@ const CONVERSATIONS = [
     realtimeUtteranceCount: 0,
     cascadeUtteranceCount: 3,
     sttModel: 'gpt-4o-mini-transcribe',
+    mtModel: 'gpt-4o-mini',
+    ttsModel: 'gpt-4o-mini-tts',
     kind: 'live',
     wer: null,
     realtimeEndToEndMedianMs: null,
@@ -78,7 +80,7 @@ describe('LabPanel', () => {
   // mode must render its median with the delta against the pinned baseline,
   // improvements pointing down.
   it('renders per-mode deltas of current medians against the baseline', async () => {
-    render(<LabPanel />);
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
 
     expect(await screen.findByText('Cascade')).toBeInTheDocument();
     expect(screen.getByText('1980ms')).toBeInTheDocument();
@@ -90,7 +92,7 @@ describe('LabPanel', () => {
   // Catches noise cards with nothing to compare: a mode with current sessions but
   // no pinned counterpart (realtime here) must not render a card at all.
   it('hides modes that have no baseline counterpart', async () => {
-    render(<LabPanel />);
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
     await screen.findByText('Cascade');
 
     expect(screen.queryByText('Realtime')).not.toBeInTheDocument();
@@ -99,7 +101,7 @@ describe('LabPanel', () => {
   // Catches a row's pin toggle not actually changing the set: unpinning the only
   // pinned conversation must post an empty set (and pinning posts the full new set).
   it('toggles a single conversation in and out of the baseline set', async () => {
-    render(<LabPanel />);
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
     await screen.findByText('Cascade');
 
     fireEvent.click(screen.getByRole('button', { name: 'Pinned' }));
@@ -114,14 +116,14 @@ describe('LabPanel', () => {
   // Catches baseline membership being invisible in the table: a pinned row's
   // toggle must read as pinned.
   it('marks pinned conversations in the experiments table', async () => {
-    render(<LabPanel />);
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
 
     expect(await screen.findByRole('button', { name: 'Pinned' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   // Catches the escape hatch missing: clearing must post an empty baseline set.
   it('clears the baseline from the progress header', async () => {
-    render(<LabPanel />);
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
     await screen.findByText('Cascade');
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear baseline' }));

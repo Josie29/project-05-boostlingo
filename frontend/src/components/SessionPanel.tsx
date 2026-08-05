@@ -322,9 +322,10 @@ function ModeCard({
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => onStageModelsChange({ ...stageModels, mtProvider: event.target.value })}
             >
+              {/* Option value stays the provider (the wire choice); the label is just the model — provider is plumbing, not what the user is picking between. */}
               {[architecture.cascade.mt, architecture.cascade.mtAlternative].map(({ provider, model }) => (
                 <option key={provider} value={provider}>
-                  {model} · {provider}
+                  {model}
                 </option>
               ))}
             </select>

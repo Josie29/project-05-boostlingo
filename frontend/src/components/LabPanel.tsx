@@ -1,11 +1,28 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getConversations,
   getSummary,
   pinBaseline,
+  type CascadeStageModels,
   type ConversationListing,
+  type LanguagePair,
   type SummaryGroup,
 } from '../api';
+import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
+
+export interface LabPanelProps {
+  /** Language pair experiments run with — the same one Live sessions use. */
+  pair: LanguagePair;
+  /** Stage model picks from the cascade card — experiments honor them too. */
+  stageModels: CascadeStageModels;
+}
+
+const PHASE_LABEL: Record<ExperimentPhase, string> = {
+  decoding: 'Decoding audio…',
+  running: 'Replaying at 1× — the file is the mic…',
+  draining: 'File finished; letting the pipeline settle…',
+  scoring: 'Scoring WER…',
+};
 
 function formatMs(ms: number | null): string {
   // == null also catches undefined from a backend predating these fields.
@@ -46,11 +63,17 @@ function Delta({ deltaMs }: { deltaMs: number }) {
  * from the pin action, and socket-free, so viewing it never disturbs a live
  * session.
  */
-export function LabPanel() {
+export function LabPanel({ pair, stageModels }: LabPanelProps) {
   const [conversations, setConversations] = useState<ConversationListing[] | null>(null);
   const [baselineGroups, setBaselineGroups] = useState<SummaryGroup[] | null>(null);
   const [currentGroups, setCurrentGroups] = useState<SummaryGroup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [groundTruth, setGroundTruth] = useState('');
+  const [runPhase, setRunPhase] = useState<ExperimentPhase | null>(null);
+  const [runResult, setRunResult] = useState<ExperimentResult | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     // group='mode': the progress pane compares paradigms; the MT provider is one of
@@ -86,6 +109,24 @@ export function LabPanel() {
     pinBaseline([])
       .then(refresh)
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Failed to clear the baseline.'));
+  }
+
+  function handleRun(): void {
+    const file = fileRef.current?.files?.[0];
+    if (!file || groundTruth.trim() === '' || runPhase !== null) return;
+
+    setRunResult(null);
+    setRunError(null);
+    runCascadeExperiment(
+      { file, fixtureName: file.name, groundTruth, pair, models: stageModels },
+      setRunPhase,
+    )
+      .then((result) => {
+        setRunResult(result);
+        refresh();
+      })
+      .catch((cause: unknown) => setRunError(cause instanceof Error ? cause.message : 'The experiment failed.'))
+      .finally(() => setRunPhase(null));
   }
 
   const hasBaseline = baselineGroups !== null && baselineGroups.length > 0;
@@ -145,6 +186,40 @@ export function LabPanel() {
         )}
       </section>
 
+      <section className="lab-panel" aria-label="Run an experiment">
+        <div className="lab-panel__header">
+          <h3>Run an experiment</h3>
+        </div>
+        <p className="lab-panel__empty">
+          Cascade only for now. Replays an audio file through a cascade session (models from the Live card) and
+          scores the recognized transcript against your ground truth — WER measures the speech-to-text output
+          only, not translation quality. Keep this tab open; you&apos;ll hear the TTS output as it runs.
+        </p>
+        <div className="lab-panel__run-form">
+          <input ref={fileRef} type="file" accept="audio/*,video/*" aria-label="Fixture audio file" />
+          <textarea
+            className="lab-panel__ground-truth"
+            aria-label="Ground truth transcript"
+            placeholder="Paste the ground-truth transcript of the file's speech (e.g. from docs/benchmark-script.md)"
+            value={groundTruth}
+            onChange={(event) => setGroundTruth(event.target.value)}
+            rows={4}
+          />
+          <button type="button" className="lab-panel__refresh" onClick={handleRun} disabled={runPhase !== null}>
+            {runPhase === null ? 'Run experiment' : 'Running…'}
+          </button>
+          {runPhase !== null && <p className="lab-panel__empty">{PHASE_LABEL[runPhase]}</p>}
+          {runError !== null && <p className="lab-panel__error">{runError}</p>}
+          {runResult !== null && (
+            <p className="lab-panel__run-result">
+              WER {(runResult.wer.wer * 100).toFixed(1)}% over {runResult.wer.referenceWords} reference words (
+              {runResult.wer.substitutions} sub · {runResult.wer.insertions} ins · {runResult.wer.deletions} del) —{' '}
+              {runResult.utteranceCount} utterances captured.
+            </p>
+          )}
+        </div>
+      </section>
+
       <section className="lab-panel" aria-label="Experiments">
         <div className="lab-panel__header">
           <h3>Experiments</h3>
@@ -168,6 +243,7 @@ export function LabPanel() {
                   <th>Pair</th>
                   <th>STT</th>
                   <th>MT</th>
+                  <th>TTS</th>
                   <th>RT e2e med</th>
                   <th>CAS e2e med</th>
                   <th>WER</th>
@@ -192,12 +268,25 @@ export function LabPanel() {
                     <td>
                       {conversation.sourceLang}→{conversation.targetLang}
                     </td>
-                    <td>
-                      <code>{conversation.sttModel}</code>
-                    </td>
-                    <td>
-                      <code>{conversation.translationProvider}</code>
-                    </td>
+                    {/* Realtime-only rows ran one model for the whole pipeline; the display
+                        override also corrects rows stored before per-stage stamping existed. */}
+                    {conversationMode(conversation) === 'realtime' ? (
+                      <td colSpan={3}>
+                        <code>gpt-realtime</code>
+                      </td>
+                    ) : (
+                      <>
+                        <td>
+                          <code>{conversation.sttModel}</code>
+                        </td>
+                        <td>
+                          <code>{conversation.mtModel ?? conversation.translationProvider}</code>
+                        </td>
+                        <td>
+                          <code>{conversation.ttsModel ?? '—'}</code>
+                        </td>
+                      </>
+                    )}
                     <td>{formatMs(conversation.realtimeEndToEndMedianMs)}</td>
                     <td>{formatMs(conversation.cascadeEndToEndMedianMs)}</td>
                     <td>{conversation.wer == null ? '—' : `${(conversation.wer * 100).toFixed(1)}%`}</td>

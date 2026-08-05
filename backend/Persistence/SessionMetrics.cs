@@ -75,6 +75,10 @@ public enum TranscriptLane
 /// name what actually ran.</param>
 /// <param name="MtProvider">The session's negotiated MT provider, or <c>null</c> for
 /// the process default (stamped server-side at save).</param>
+/// <param name="Kind"><c>"experiment"</c> for a fixture replay run (Lab P3); omitted means <c>"live"</c>.</param>
+/// <param name="Wer">Word Error Rate of the run's STT output against its ground truth
+/// (Lab P3) — computed client-side, where both texts live. <c>null</c> for live sessions.</param>
+/// <param name="Fixture">Name of the replayed fixture (e.g. the audio file), or <c>null</c> for live sessions.</param>
 public sealed record ConversationMetricsReport(
     string ConversationId,
     string SourceLang,
@@ -84,7 +88,10 @@ public sealed record ConversationMetricsReport(
     IReadOnlyList<UtteranceMetricsRecord> Utterances,
     IReadOnlyList<TranscriptEntryRecord> Transcript,
     string? SttModel = null,
-    string? MtProvider = null);
+    string? MtProvider = null,
+    string? Kind = null,
+    double? Wer = null,
+    string? Fixture = null);
 
 /// <summary>
 /// One utterance's latency breakdown - the persisted form of the frontend's
@@ -125,6 +132,18 @@ public sealed record TranscriptEntryRecord(
     bool Final,
     bool Truncated = false);
 
+/// <summary>
+/// The effective per-stage config stamped onto a stored conversation: what actually
+/// ran, with every default resolved - stored rows must stay true even after a config
+/// default changes. For a realtime-only conversation all three stage models are the
+/// realtime model, since one model handles the whole pipeline there.
+/// </summary>
+/// <param name="TranslationProvider">Effective MT provider name.</param>
+/// <param name="SttModel">Effective STT model.</param>
+/// <param name="MtModel">Effective MT model.</param>
+/// <param name="TtsModel">Effective TTS model.</param>
+public sealed record ResolvedStageConfig(string TranslationProvider, string SttModel, string MtModel, string TtsModel);
+
 /// <summary>One stored conversation, as listed by <c>GET /api/metrics/conversations</c>.</summary>
 /// <param name="ConversationId">See <see cref="ConversationMetricsReport.ConversationId"/>.</param>
 /// <param name="SourceLang">Language tag the speaker used.</param>
@@ -136,7 +155,9 @@ public sealed record TranscriptEntryRecord(
 /// <param name="EndedAtMs">Client clock at Stop.</param>
 /// <param name="RealtimeUtteranceCount">Utterances captured in realtime mode.</param>
 /// <param name="CascadeUtteranceCount">Utterances captured in cascade mode.</param>
-/// <param name="SttModel">The STT model the conversation's cascade utterances ran on (stamped at save).</param>
+/// <param name="SttModel">The STT model this conversation ran on (stamped at save; the realtime model for realtime-only rows).</param>
+/// <param name="MtModel">The MT model, resolved the same way.</param>
+/// <param name="TtsModel">The TTS model, resolved the same way.</param>
 /// <param name="Kind"><c>"live"</c> for mic sessions; <c>"experiment"</c> reserved for Lab P3 fixture runs.</param>
 /// <param name="Wer">Word Error Rate for fixture runs, or <c>null</c> for live sessions (no ground truth).</param>
 /// <param name="RealtimeEndToEndMedianMs">Median realtime end-to-end, or <c>null</c> with no completed realtime utterances.</param>
@@ -152,6 +173,8 @@ public sealed record ConversationListing(
     int RealtimeUtteranceCount,
     int CascadeUtteranceCount,
     string SttModel,
+    string MtModel,
+    string TtsModel,
     string Kind,
     double? Wer,
     double? RealtimeEndToEndMedianMs,
