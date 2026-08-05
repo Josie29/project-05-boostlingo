@@ -109,6 +109,37 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
 
     /// <inheritdoc />
     /// <remarks>
+    /// Code-review fix: <see cref="CascadePipeline.TranslateSegmentAsync"/> calls this
+    /// instead of a final <see cref="OnTranslationChunkAsync"/> chunk when an
+    /// utterance's translation ends without ever settling - a barge-in (#11)
+    /// cancelled it mid-stream, or the provider itself failed. Without this,
+    /// <paramref name="targetUtteranceId"/> would never leave <see cref="_pendingUtteranceIds"/>/
+    /// <see cref="_supersededUtteranceIds"/> (both only ever cleared by <see cref="PumpAsync"/>
+    /// reaching an <c>IsFinal</c> chunk, which is now never coming), and any
+    /// already-sent <c>tts.audio.start</c> for it would never get a matching
+    /// <c>tts.audio.end</c>. Cancels <see cref="_currentPhraseCts"/> synchronously here
+    /// (mirroring <see cref="OnBargeInAsync"/>) rather than only enqueuing, since MT is
+    /// strictly sequential - if this observer's pump is mid-synthesis right now, it can
+    /// only be synthesizing a phrase from this exact utterance's own already-queued
+    /// chunks (no later utterance's chunks can have been enqueued yet). The rest of the
+    /// cleanup (removing from both sets, sending a closing <c>tts.audio.end</c> if a
+    /// start already went out) is enqueued so it happens in-order relative to any of
+    /// this utterance's own chunks still ahead of it in <see cref="_queue"/>.
+    /// </remarks>
+    public Task OnTranslationAbortedAsync(
+        string sourceUtteranceId, string targetUtteranceId, ICascadeEventSink events, CancellationToken cancellationToken)
+    {
+        lock (_phraseCtsLock)
+        {
+            _currentPhraseCts?.Cancel();
+        }
+
+        _queue.Writer.TryWrite(new QueuedChunk(Chunk: null, Events: events, AbortedTargetUtteranceId: targetUtteranceId));
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
     /// Cancels whichever phrase is mid-synthesis right now (if any) via
     /// <see cref="_currentPhraseCts"/>, and marks every other utterance still pending
     /// as superseded so <see cref="PumpAsync"/> drops their remaining queued chunks
@@ -170,74 +201,112 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
 
         await foreach (var queued in _queue.Reader.ReadAllAsync(cancellationToken))
         {
-            var chunk = queued.Chunk;
-            var events = queued.Events;
-
-            if (chunk.TargetUtteranceId != currentUtteranceId)
+            try
             {
-                // A new utterance's chunks have started arriving - previous
-                // utterances always reach their IsFinal chunk (handled below) before
-                // this can happen, since CascadePipeline serializes MT per utterance.
-                chunker = new SentenceChunker();
-                currentUtteranceId = chunk.TargetUtteranceId;
-                startSent = false;
-                firstByteMarked = false;
-            }
-
-            if (_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
-            {
-                // A barge-in (#11) already cancelled this utterance before this chunk
-                // was dequeued - consume it to keep queue ordering intact, but no
-                // chunking, synthesis, or tts.audio.end for it. The client already
-                // learned this utterance was superseded from the bargein envelope
-                // OnBargeInAsync's caller sent.
-                if (chunk.IsFinal)
+                if (queued.AbortedTargetUtteranceId is { } abortedUtteranceId)
                 {
-                    _supersededUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
-                    _pendingUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
-                    currentUtteranceId = null;
+                    // Code-review fix: OnTranslationAbortedAsync's queued marker - no
+                    // IsFinal chunk is ever coming for this utterance now, so this is
+                    // the only place left that can close it out. Only touches pump
+                    // state (currentUtteranceId/startSent/firstByteMarked) if this is
+                    // genuinely the utterance the pump is on right now; if the pump
+                    // hasn't dequeued any of its chunks yet (nothing was ever
+                    // synthesized for it), there is nothing to reset.
+                    if (abortedUtteranceId == currentUtteranceId)
+                    {
+                        if (startSent)
+                        {
+                            await queued.Events!.SendEventAsync(
+                                CascadeMessageTypes.TtsAudioEnd, new CascadeTtsAudioEndPayload(abortedUtteranceId), cancellationToken);
+                        }
+
+                        currentUtteranceId = null;
+                        startSent = false;
+                        firstByteMarked = false;
+                    }
+
+                    _supersededUtteranceIds.TryRemove(abortedUtteranceId, out _);
+                    _pendingUtteranceIds.TryRemove(abortedUtteranceId, out _);
+                    continue;
                 }
 
-                continue;
-            }
+                var chunk = queued.Chunk!;
+                var events = queued.Events!;
 
-            if (!chunk.IsFinal)
-            {
-                foreach (var phrase in chunker.Append(chunk.Text))
+                if (chunk.TargetUtteranceId != currentUtteranceId)
+                {
+                    // A new utterance's chunks have started arriving - previous
+                    // utterances always reach their IsFinal chunk (handled below) before
+                    // this can happen, since CascadePipeline serializes MT per utterance.
+                    chunker = new SentenceChunker();
+                    currentUtteranceId = chunk.TargetUtteranceId;
+                    startSent = false;
+                    firstByteMarked = false;
+                }
+
+                if (_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
+                {
+                    // A barge-in (#11) already cancelled this utterance before this chunk
+                    // was dequeued - consume it to keep queue ordering intact, but no
+                    // chunking, synthesis, or tts.audio.end for it. The client already
+                    // learned this utterance was superseded from the bargein envelope
+                    // OnBargeInAsync's caller sent.
+                    if (chunk.IsFinal)
+                    {
+                        _supersededUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+                        _pendingUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+                        currentUtteranceId = null;
+                    }
+
+                    continue;
+                }
+
+                if (!chunk.IsFinal)
+                {
+                    foreach (var phrase in chunker.Append(chunk.Text))
+                    {
+                        (startSent, firstByteMarked) =
+                            await SynthesizePhraseAsync(phrase, chunk, events, startSent, firstByteMarked, cancellationToken);
+                    }
+
+                    continue;
+                }
+
+                // IsFinal: chunk.Text here is the whole accumulated translation (see
+                // TranslationChunk's docs), not a further delta - appending it to the
+                // chunker would double-count everything already buffered from the
+                // partials above. Only the tail after the chunker's last boundary (if
+                // any) still needs synthesizing - unless a barge-in cancelled the phrase
+                // this exact chunk was mid-synthesis on (see SynthesizePhraseAsync's own
+                // cancellation handling), in which case _supersededUtteranceIds now
+                // carries this utterance even though the check above already passed.
+                var remainder = chunker.Flush();
+                if (!string.IsNullOrEmpty(remainder) && !_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
                 {
                     (startSent, firstByteMarked) =
-                        await SynthesizePhraseAsync(phrase, chunk, events, startSent, firstByteMarked, cancellationToken);
+                        await SynthesizePhraseAsync(remainder, chunk, events, startSent, firstByteMarked, cancellationToken);
                 }
 
-                continue;
-            }
+                if (startSent && !_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
+                {
+                    await events.SendEventAsync(
+                        CascadeMessageTypes.TtsAudioEnd, new CascadeTtsAudioEndPayload(chunk.TargetUtteranceId), cancellationToken);
+                    await CascadeLatencyMarks.EmitAsync(
+                        chunk.SourceUtteranceId, CascadeLatencyStages.TtsEnd, events, _logger, cancellationToken);
+                }
 
-            // IsFinal: chunk.Text here is the whole accumulated translation (see
-            // TranslationChunk's docs), not a further delta - appending it to the
-            // chunker would double-count everything already buffered from the
-            // partials above. Only the tail after the chunker's last boundary (if
-            // any) still needs synthesizing - unless a barge-in cancelled the phrase
-            // this exact chunk was mid-synthesis on (see SynthesizePhraseAsync's own
-            // cancellation handling), in which case _supersededUtteranceIds now
-            // carries this utterance even though the check above already passed.
-            var remainder = chunker.Flush();
-            if (!string.IsNullOrEmpty(remainder) && !_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
+                _supersededUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+                _pendingUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
+                currentUtteranceId = null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                (startSent, firstByteMarked) =
-                    await SynthesizePhraseAsync(remainder, chunk, events, startSent, firstByteMarked, cancellationToken);
+                // Code-review fix: one malformed/unexpected queued item must not kill
+                // the whole synthesis pump for the rest of the session - mirrors how
+                // SynthesizePhraseAsync already isolates a single phrase's own failure
+                // below, just one level up.
+                _logger.LogError(ex, "Text-to-speech pump failed processing a queued item; continuing with the next.");
             }
-
-            if (startSent && !_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
-            {
-                await events.SendEventAsync(
-                    CascadeMessageTypes.TtsAudioEnd, new CascadeTtsAudioEndPayload(chunk.TargetUtteranceId), cancellationToken);
-                await CascadeLatencyMarks.EmitAsync(
-                    chunk.SourceUtteranceId, CascadeLatencyStages.TtsEnd, events, _logger, cancellationToken);
-            }
-
-            _supersededUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
-            _pendingUtteranceIds.TryRemove(chunk.TargetUtteranceId, out _);
-            currentUtteranceId = null;
         }
     }
 
@@ -271,6 +340,19 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
         bool firstByteAlreadyMarked,
         CancellationToken cancellationToken)
     {
+        if (_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
+        {
+            // Code-review fix: checked here, before ever sending tts.audio.start, not
+            // after - narrows the race between PumpAsync's own superseded check (just
+            // before calling this method) and a barge-in landing in that same instant.
+            // Checking only after the start send (the previous order) meant a phrase
+            // superseded in exactly that window still produced a dangling
+            // tts.audio.start with no matching end, since this same check further down
+            // (now removed) would already suppress the audio and the closing-end guard
+            // in PumpAsync only fires when a start was actually sent.
+            return (startAlreadySent, firstByteAlreadyMarked);
+        }
+
         if (!startAlreadySent)
         {
             await events.SendEventAsync(
@@ -293,14 +375,6 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
 
         try
         {
-            if (_supersededUtteranceIds.ContainsKey(chunk.TargetUtteranceId))
-            {
-                // Narrows the race between PumpAsync's own superseded check (just
-                // before calling this method) and a barge-in landing in that same
-                // instant - cheap to re-check here since nothing has been awaited yet.
-                return (startAlreadySent, firstByteAlreadyMarked);
-            }
-
             var request = new TtsRequest(chunk.TargetUtteranceId, phraseText, chunk.TargetLang);
             await foreach (var audioChunk in _ttsProvider.SynthesizeAsync(request, phraseCts.Token))
             {
@@ -332,14 +406,18 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
                 "Text-to-speech failed for utterance {UtteranceId} in session {SessionId} (provider: OpenAI).",
                 chunk.TargetUtteranceId,
                 events.SessionId);
-            await events.SendEventAsync(
-                CascadeMessageTypes.Error,
-                // UtteranceId is the source-lane id (see CascadeErrorPayload's remarks),
-                // matching every other stage's error/latency-mark keying even though
-                // this method otherwise tracks the target-lane id.
-                new CascadeErrorPayload(
-                    "Text-to-speech failed for one utterance.", CascadeErrorStages.Tts, chunk.SourceUtteranceId, Recoverable: true),
-                cancellationToken);
+
+            // UtteranceId is the source-lane id (see CascadeErrorPayload's remarks),
+            // matching every other stage's error/latency-mark keying even though this
+            // method otherwise tracks the target-lane id.
+            await CascadeErrors.TrySendAsync(
+                events,
+                CascadeErrorStages.Tts,
+                "Text-to-speech failed for one utterance.",
+                recoverable: true,
+                _logger,
+                cancellationToken,
+                chunk.SourceUtteranceId);
         }
         finally
         {
@@ -357,5 +435,12 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
         return (startAlreadySent, firstByteAlreadyMarked);
     }
 
-    private readonly record struct QueuedChunk(TranslationChunk Chunk, ICascadeEventSink Events);
+    /// <summary>
+    /// One entry in <see cref="_queue"/>: either a real translation chunk to
+    /// synthesize (<see cref="Chunk"/> non-null), or an abort marker for
+    /// <see cref="AbortedTargetUtteranceId"/> (code-review fix - see
+    /// <see cref="OnTranslationAbortedAsync"/>), never both.
+    /// </summary>
+    private readonly record struct QueuedChunk(
+        TranslationChunk? Chunk, ICascadeEventSink? Events, string? AbortedTargetUtteranceId = null);
 }

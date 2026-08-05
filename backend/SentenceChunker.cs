@@ -94,7 +94,23 @@ public sealed class SentenceChunker
     /// strips whitespace, not punctuation).
     /// </summary>
     /// <returns>The index of the last character in the first boundary run, or -1 if
-    /// the buffer contains no boundary character.</returns>
+    /// the buffer contains no boundary character, or if the only run found runs all
+    /// the way to the end of the buffer (see this method's remarks).</returns>
+    /// <remarks>
+    /// Code-review fix: a run that reaches the very end of the currently-buffered text
+    /// is treated as incomplete (returns -1, same as "no boundary at all") rather than
+    /// cut immediately - <see cref="Append"/> is fed arbitrary-length token deltas that
+    /// can split anywhere, including mid-punctuation-run, and the buffer's tail is
+    /// always exactly whatever text the most recent delta ended with. Without this, a
+    /// boundary run split across two deltas - e.g. <c>Append("Hi..")</c> (cut and
+    /// cleared immediately, since ".." was already the whole buffer's tail) followed by
+    /// <c>Append(".")</c> (now the run is the *entire* buffer, with no leading text
+    /// left to attach it to) - reports a punctuation-only phrase ("." on its own) for
+    /// the second call, which <see cref="TtsCascadeObserver"/> would otherwise dispatch
+    /// to TTS (text-to-speech) as a nonsensical synthesis request. Deferring here means
+    /// the run only gets reported once either more text confirms where it actually ends
+    /// (a later <see cref="Append"/> call), or the utterance is over (<see cref="Flush"/>).
+    /// </remarks>
     private int IndexOfBoundaryRunEnd()
     {
         for (var i = 0; i < _buffer.Length; i++)
@@ -107,6 +123,11 @@ public sealed class SentenceChunker
             while (i + 1 < _buffer.Length && Array.IndexOf(BoundaryChars, _buffer[i + 1]) >= 0)
             {
                 i++;
+            }
+
+            if (i == _buffer.Length - 1)
+            {
+                return -1;
             }
 
             return i;

@@ -112,6 +112,39 @@ public class CascadeAudioSessionTests
     }
 
     /// <summary>
+    /// Confirms a second session.start on the same connection is rejected with a
+    /// recoverable error and never reaches the pipeline a second time - without this
+    /// guard, a repeat session.start would open a second STT (speech-to-text) stream
+    /// via CascadePipeline.OnSessionStartedAsync and orphan the first one's already-
+    /// running pump tasks, leaking the connection for the rest of the session.
+    /// </summary>
+    [Fact]
+    public async Task DuplicateSessionStart_ReceivesRecoverableError_AndPipelineStartedOnlyOnce()
+    {
+        var fakePipeline = new FakeCascadePipeline();
+        using var factory = new CascadeTestFactory(fakePipeline);
+        using var socket = await ConnectAsync(factory.Server);
+
+        await SendTextAsync(socket, """{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"es"}}""");
+        var ready = await ReceiveEnvelopeAsync(socket);
+        Assert.Equal("session.ready", ready.RootElement.GetProperty("type").GetString());
+
+        await SendTextAsync(socket, """{"v":1,"type":"session.start","payload":{"sourceLang":"es","targetLang":"en"}}""");
+        var errorEnvelope = await ReceiveEnvelopeAsync(socket);
+
+        Assert.Equal("error", errorEnvelope.RootElement.GetProperty("type").GetString());
+        var payload = errorEnvelope.RootElement.GetProperty("payload");
+        Assert.Equal(CascadeErrorStages.Session, payload.GetProperty("stage").GetString());
+        Assert.True(payload.GetProperty("recoverable").GetBoolean());
+
+        // Only the first session.start's language pair ever reached the pipeline.
+        Assert.Equal(1, fakePipeline.SessionStartedCount);
+        Assert.Equal("en", fakePipeline.StartedConfig?.SourceLang);
+
+        await CloseAsync(socket);
+    }
+
+    /// <summary>
     /// Confirms an unparseable control frame gets a JSON error event back instead of
     /// silently dropping the message or tearing down the whole connection.
     /// </summary>
@@ -255,12 +288,15 @@ file sealed class FakeCascadePipeline(Func<ICascadeEventSink, Task>? onSessionSt
 
     public CascadeSessionConfig? StartedConfig { get; private set; }
 
+    public int SessionStartedCount { get; private set; }
+
     public int SessionEndedCount { get; private set; }
 
     public TaskCompletionSource EndedSignal { get; } = new();
 
     public async Task OnSessionStartedAsync(CascadeSessionConfig config, ICascadeEventSink events, CancellationToken cancellationToken)
     {
+        SessionStartedCount++;
         StartedConfig = config;
         if (onSessionStarted is not null)
         {

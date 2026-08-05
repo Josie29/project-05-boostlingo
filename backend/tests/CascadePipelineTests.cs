@@ -395,6 +395,41 @@ public class CascadePipelineTests
     }
 
     /// <summary>
+    /// Confirms a translation failure notifies every registered ITranslationObserver
+    /// via OnTranslationAbortedAsync - not just the client-facing error envelope - since
+    /// TranslateSegmentAsync's failure exit never sends a final TranslationChunk for
+    /// this utterance. Without this, an observer that tracks per-utterance state across
+    /// chunks (TTS/#7's TtsCascadeObserver) would never learn the utterance ended,
+    /// leaking that state (and, if it had already sent tts.audio.start, leaving the
+    /// client with no matching tts.audio.end) for the rest of the session.
+    /// </summary>
+    [Fact]
+    public async Task TranslationFailure_NotifiesObserversOfAbort_WithSourceAndTargetUtteranceIds()
+    {
+        var stream = new FakeSttStream();
+        var observer = new FakeTranslationObserver();
+        var translationProvider = new FakeTranslationProvider(_ => Failing());
+        var pipeline = CreatePipeline(new FakeSttProvider(stream), translationProvider, [observer]);
+        var sink = new FakeEventSink();
+        var events = new LaneSplitEventReader(sink);
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        stream.Emit(new SttSegment("utt-a", "Bad", IsFinal: true, TimestampMs: 10));
+
+        var errorEnvelope = await events.Other.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
+
+        // Draining the session (which awaits the translation pump to finish) guarantees
+        // TranslateSegmentAsync's own abort notification - which runs immediately after
+        // the error send above, on the same background task - has completed too.
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
+
+        var aborted = Assert.Single(observer.AbortedCalls);
+        Assert.Equal("utt-a", aborted.SourceUtteranceId);
+        Assert.Equal("utt-a-target", aborted.TargetUtteranceId);
+    }
+
+    /// <summary>
     /// Confirms a finalized STT (speech-to-text) segment with only whitespace text is
     /// still delivered to the client's source-lane transcript (so the frontend sees the
     /// speaker's turn ended), but never reaches machine translation at all (#12) - there
@@ -568,7 +603,6 @@ public class CascadePipelineTests
         new(
             provider,
             translationProvider ?? new FakeTranslationProvider(_ => Tokens()),
-            segmentObservers: [],
             translationObservers ?? [],
             NullLogger<CascadePipeline>.Instance);
 
@@ -760,9 +794,19 @@ file sealed class FakeTranslationObserver : ITranslationObserver
 {
     public List<TranslationChunk> Chunks { get; } = [];
 
+    /// <summary>Every (sourceUtteranceId, targetUtteranceId) pair OnTranslationAbortedAsync was called with.</summary>
+    public List<(string SourceUtteranceId, string TargetUtteranceId)> AbortedCalls { get; } = [];
+
     public Task OnTranslationChunkAsync(TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken)
     {
         Chunks.Add(chunk);
+        return Task.CompletedTask;
+    }
+
+    public Task OnTranslationAbortedAsync(
+        string sourceUtteranceId, string targetUtteranceId, ICascadeEventSink events, CancellationToken cancellationToken)
+    {
+        AbortedCalls.Add((sourceUtteranceId, targetUtteranceId));
         return Task.CompletedTask;
     }
 }

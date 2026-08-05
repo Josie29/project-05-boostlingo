@@ -61,8 +61,7 @@ public sealed record TranslationChunk(string SourceUtteranceId, string TargetUtt
 /// <summary>
 /// Lets a later cascade stage (text-to-speech in particular) observe every streamed
 /// translation chunk as it's produced, without <see cref="CascadePipeline"/> needing to
-/// know that stage exists - mirrors <see cref="ISttSegmentObserver"/>'s role for the STT
-/// stage. <see cref="CascadePipeline"/> forwards each chunk to the client's target lane
+/// know that stage exists. <see cref="CascadePipeline"/> forwards each chunk to the client's target lane
 /// first, then to every registered observer; registering zero observers (the case until
 /// #7 lands) is a no-op.
 /// </summary>
@@ -78,6 +77,25 @@ public interface ITranslationObserver
     /// itself used to send the chunk's own <c>transcript.*</c> event.</param>
     /// <param name="cancellationToken">Propagates session cancellation.</param>
     Task OnTranslationChunkAsync(TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Called instead of a final <see cref="OnTranslationChunkAsync"/> call when a
+    /// source utterance's translation ends without ever reaching an <c>IsFinal</c>
+    /// chunk (code-review fix) - either a barge-in (#11) cancelled it mid-stream, or
+    /// the provider itself failed. Lets an observer that accumulates per-utterance
+    /// state across chunks (TTS/#7's <c>TtsCascadeObserver</c> in particular) clear
+    /// that state and close out anything already sent to the client (e.g. an
+    /// already-opened <c>tts.audio.start</c>) even though no <c>IsFinal</c> chunk is
+    /// ever coming for this utterance. Default no-op so an observer with no
+    /// per-utterance state of its own (nothing to leak) doesn't need to implement it.
+    /// </summary>
+    /// <param name="sourceUtteranceId">The <see cref="TranslationChunk.SourceUtteranceId"/> whose translation was aborted.</param>
+    /// <param name="targetUtteranceId">The <see cref="TranslationChunk.TargetUtteranceId"/> that utterance's own chunks used.</param>
+    /// <param name="events">Sink for any closing event the observer still needs to send (e.g. <c>tts.audio.end</c>).</param>
+    /// <param name="cancellationToken">Propagates session cancellation.</param>
+    Task OnTranslationAbortedAsync(
+        string sourceUtteranceId, string targetUtteranceId, ICascadeEventSink events, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 }
 
 /// <summary>

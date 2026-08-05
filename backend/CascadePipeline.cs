@@ -26,7 +26,6 @@ using System.Threading.Channels;
 public sealed class CascadePipeline(
     ISttProvider sttProvider,
     ITranslationProvider translationProvider,
-    IEnumerable<ISttSegmentObserver> segmentObservers,
     IEnumerable<ITranslationObserver> translationObservers,
     ILogger<CascadePipeline> logger) : ICascadePipeline
 {
@@ -64,6 +63,16 @@ public sealed class CascadePipeline(
     private CascadeSessionConfig? _config;
 
     /// <summary>
+    /// The STT (speech-to-text) language hint negotiated for this session, computed
+    /// once in <see cref="OnSessionStartedAsync"/> and reused by <see cref="TryReopenSttStreamAsync"/> -
+    /// both used to compute the exact same value from <see cref="_config"/> and the
+    /// language registry (code-review fix: the duplicated lookup could drift between
+    /// the two call sites, and reusing it here also removes <c>TryReopenSttStreamAsync</c>'s
+    /// own <c>_config!</c> null-forgiving reference).
+    /// </summary>
+    private string? _sttLanguageHint;
+
+    /// <summary>
     /// Whether <see cref="PumpSegmentsAsync"/> has already attempted its one allowed
     /// STT (speech-to-text) stream reopen for this session (#12, error handling
     /// hardening). Set the first time the read loop's stream dies, whatever the
@@ -83,19 +92,31 @@ public sealed class CascadePipeline(
     /// </remarks>
     public async Task OnSessionStartedAsync(CascadeSessionConfig config, ICascadeEventSink events, CancellationToken cancellationToken)
     {
+        if (_sttStream is not null)
+        {
+            // Defensive only (code-review fix): CascadeSession's own _started guard
+            // should already stop a repeat session.start from ever reaching here. This
+            // second layer protects CascadePipeline itself from any other caller (e.g.
+            // a future test, or a bug in that guard) opening a second STT stream and
+            // orphaning the first one's already-running pump tasks.
+            return;
+        }
+
         _config = config;
 
         // Looked up from the language registry (rather than passing config.SourceLang
         // straight through) so a provider whose language hint differs from the wire
         // code (see LanguageInfo.SttLanguageHint) picks up that difference for free -
-        // CascadeAudioSession.HandleSessionStartAsync already validated config.SourceLang
+        // CascadeSession.HandleSessionStartAsync already validated config.SourceLang
         // against the same registry before this method is ever called, but the fallback
         // below still guards a direct caller (e.g. a unit test) that skips that step.
-        var sttLanguageHint = Languages.Find(config.SourceLang)?.SttLanguageHint ?? config.SourceLang;
+        // Computed once and cached in _sttLanguageHint - TryReopenSttStreamAsync reuses
+        // the exact same value rather than re-deriving it (code-review fix).
+        _sttLanguageHint = Languages.Find(config.SourceLang)?.SttLanguageHint ?? config.SourceLang;
 
         try
         {
-            _sttStream = await sttProvider.StartStreamAsync(new SttStreamConfig(sttLanguageHint), cancellationToken);
+            _sttStream = await sttProvider.StartStreamAsync(new SttStreamConfig(_sttLanguageHint), cancellationToken);
         }
         catch (SttProviderUnavailableException ex)
         {
@@ -103,10 +124,7 @@ public sealed class CascadePipeline(
                 ex,
                 "Speech-to-text provider could not be started for session {SessionId} (provider: OpenAI).",
                 events.SessionId);
-            await events.SendEventAsync(
-                CascadeMessageTypes.Error,
-                new CascadeErrorPayload(ex.Message, CascadeErrorStages.Stt, UtteranceId: null, Recoverable: false),
-                cancellationToken);
+            await CascadeErrors.TrySendAsync(events, CascadeErrorStages.Stt, ex.Message, recoverable: false, logger, cancellationToken);
             return;
         }
 
@@ -139,10 +157,7 @@ public sealed class CascadePipeline(
                 ex,
                 "Speech-to-text provider rejected an audio chunk in session {SessionId} (provider: OpenAI).",
                 events.SessionId);
-            await events.SendEventAsync(
-                CascadeMessageTypes.Error,
-                new CascadeErrorPayload(ex.Message, CascadeErrorStages.Stt, UtteranceId: null, Recoverable: true),
-                cancellationToken);
+            await CascadeErrors.TrySendAsync(events, CascadeErrorStages.Stt, ex.Message, recoverable: true, logger, cancellationToken);
         }
     }
 
@@ -161,6 +176,14 @@ public sealed class CascadePipeline(
             {
                 // Expected: cancelling _pumpCts above is exactly what stops the pump.
             }
+            catch (Exception ex)
+            {
+                // Code-review fix: any other fault must not skip the cleanup below
+                // (draining the translation queue, disposing the STT stream and every
+                // observer, and disposing _pumpCts) - an unhandled fault here previously
+                // propagated straight out of this method and left all three leaked.
+                logger.LogError(ex, "Segment pump task faulted during session teardown for session {SessionId}.", events.SessionId);
+            }
         }
 
         // Unblocks PumpTranslationsAsync's ReadAllAsync once no more finalized
@@ -177,6 +200,11 @@ public sealed class CascadePipeline(
             catch (OperationCanceledException)
             {
                 // Expected: cancelling _pumpCts above is exactly what stops the pump.
+            }
+            catch (Exception ex)
+            {
+                // Code-review fix: same rationale as the segment pump's own catch above.
+                logger.LogError(ex, "Translation pump task faulted during session teardown for session {SessionId}.", events.SessionId);
             }
         }
 
@@ -230,9 +258,8 @@ public sealed class CascadePipeline(
 
     /// <summary>
     /// Drains <see cref="ISttStream.ReadSegmentsAsync"/> for the lifetime of the
-    /// session: every segment becomes a <c>transcript.*</c> event on the sink, then is
-    /// handed to every <see cref="ISttSegmentObserver"/>. A provider/stream failure is
-    /// reported as an <c>error</c> event rather than propagating and killing the
+    /// session: every segment becomes a <c>transcript.*</c> event on the sink. A
+    /// provider/stream failure is reported as an <c>error</c> event rather than propagating and killing the
     /// session - the client can keep the connection open even with STT down. Also emits
     /// this utterance's <see cref="CascadeLatencyStages.SpeechEnd"/>,
     /// <see cref="CascadeLatencyStages.SttFirstPartial"/>, and
@@ -280,25 +307,17 @@ public sealed class CascadePipeline(
                 {
                     await CascadeLatencyMarks.EmitAsync(
                         segment.UtteranceId, CascadeLatencyStages.SttFinal, events, logger, cancellationToken);
+
+                    // Code-review fix: this utterance will never see another partial,
+                    // so its entry can never be marked again - removing it here (rather
+                    // than only ever adding) is what keeps _firstPartialMarked from
+                    // growing for the lifetime of the session.
+                    _firstPartialMarked.Remove(segment.UtteranceId);
                 }
                 else if (_firstPartialMarked.Add(segment.UtteranceId))
                 {
                     await CascadeLatencyMarks.EmitAsync(
                         segment.UtteranceId, CascadeLatencyStages.SttFirstPartial, events, logger, cancellationToken);
-                }
-
-                foreach (var observer in segmentObservers)
-                {
-                    try
-                    {
-                        await observer.OnSegmentAsync(segment, cancellationToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        // A future TTS observer misbehaving shouldn't take down STT
-                        // delivery to the client - just log and keep pumping.
-                        logger.LogError(ex, "STT segment observer threw for utterance {UtteranceId}.", segment.UtteranceId);
-                    }
                 }
 
                 if (segment.IsFinal && !string.IsNullOrWhiteSpace(segment.Text))
@@ -325,10 +344,7 @@ public sealed class CascadePipeline(
         {
             logger.LogError(
                 ex, "Speech-to-text stream failed for session {SessionId} (provider: OpenAI).", events.SessionId);
-            await events.SendEventAsync(
-                CascadeMessageTypes.Error,
-                new CascadeErrorPayload(ex.Message, CascadeErrorStages.Stt, UtteranceId: null, Recoverable: true),
-                cancellationToken);
+            await CascadeErrors.TrySendAsync(events, CascadeErrorStages.Stt, ex.Message, recoverable: true, logger, cancellationToken);
 
             if (_sttReopenAttempted)
             {
@@ -365,10 +381,9 @@ public sealed class CascadePipeline(
             await _sttStream.DisposeAsync();
         }
 
-        var sttLanguageHint = Languages.Find(_config!.SourceLang)?.SttLanguageHint ?? _config.SourceLang;
         try
         {
-            var stream = await sttProvider.StartStreamAsync(new SttStreamConfig(sttLanguageHint), cancellationToken);
+            var stream = await sttProvider.StartStreamAsync(new SttStreamConfig(_sttLanguageHint!), cancellationToken);
             _sttStream = stream;
             return stream;
         }
@@ -386,14 +401,13 @@ public sealed class CascadePipeline(
     /// the rest of this session; the client should stop expecting further transcripts
     /// rather than treating this as a one-off, recoverable hiccup.
     /// </summary>
-    private static async Task SendSttUnrecoverableAsync(ICascadeEventSink events, CancellationToken cancellationToken) =>
-        await events.SendEventAsync(
-            CascadeMessageTypes.Error,
-            new CascadeErrorPayload(
-                "Speech-to-text is unavailable for the rest of this session.",
-                CascadeErrorStages.Session,
-                UtteranceId: null,
-                Recoverable: false),
+    private async Task SendSttUnrecoverableAsync(ICascadeEventSink events, CancellationToken cancellationToken) =>
+        await CascadeErrors.TrySendAsync(
+            events,
+            CascadeErrorStages.Session,
+            "Speech-to-text is unavailable for the rest of this session.",
+            recoverable: false,
+            logger,
             cancellationToken);
 
     /// <summary>
@@ -510,6 +524,14 @@ public sealed class CascadePipeline(
             // event is what tells the client this utterance won't get a proper final.
             logger.LogDebug(
                 "Machine translation for utterance {UtteranceId} cancelled by a barge-in.", segment.UtteranceId);
+
+            // Code-review fix: this utterance's IsFinal chunk is never coming now, so
+            // NotifyTranslationObserversAsync's normal completion path (below, on the
+            // success exit) will never fire for it either - without this explicit abort
+            // notification, an observer that tracks per-utterance state (TTS/#7) would
+            // never learn this utterance ended, leaking that state for the rest of the
+            // session and re-reporting it on every later barge-in.
+            await NotifyTranslationObserversAbortedAsync(segment.UtteranceId, targetUtteranceId, events, cancellationToken);
             RemoveInFlightMt(segment.UtteranceId);
             return;
         }
@@ -520,11 +542,34 @@ public sealed class CascadePipeline(
                 "Machine translation failed for utterance {UtteranceId} in session {SessionId} (provider: OpenAI).",
                 segment.UtteranceId,
                 events.SessionId);
-            await events.SendEventAsync(
-                CascadeMessageTypes.Error,
-                new CascadeErrorPayload(
-                    "Machine translation failed for one utterance.", CascadeErrorStages.Mt, segment.UtteranceId, Recoverable: true),
-                cancellationToken);
+            await CascadeErrors.TrySendAsync(
+                events,
+                CascadeErrorStages.Mt,
+                "Machine translation failed for one utterance.",
+                recoverable: true,
+                logger,
+                cancellationToken,
+                segment.UtteranceId);
+
+            // Code-review fix: same rationale as the barge-in cancellation catch above -
+            // no IsFinal chunk is ever coming for this utterance now that its
+            // translation itself failed.
+            await NotifyTranslationObserversAbortedAsync(segment.UtteranceId, targetUtteranceId, events, cancellationToken);
+            RemoveInFlightMt(segment.UtteranceId);
+            return;
+        }
+
+        if (translationToken.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            // Code-review fix: a barge-in (#11) superseded this utterance after its
+            // translation had already streamed to completion above but before the
+            // final send below - HandleBargeInAsync already sent transcript.truncated/
+            // bargein for it, so sending transcript.final here too would report the
+            // same utterance as both truncated and complete. Notify observers of the
+            // abort explicitly (their normal IsFinal notification below never runs
+            // once we return here) so TTS/#7's per-utterance state still gets closed
+            // out rather than leaking, exactly as the two catches above already do.
+            await NotifyTranslationObserversAbortedAsync(segment.UtteranceId, targetUtteranceId, events, cancellationToken);
             RemoveInFlightMt(segment.UtteranceId);
             return;
         }
@@ -572,17 +617,41 @@ public sealed class CascadePipeline(
     /// event - but only if at least one utterance was actually superseded, so a
     /// speech-onset signal arriving with nothing in flight produces no events at all.
     /// </summary>
+    /// <remarks>
+    /// Code-review fix: cancel-only, deliberately never removes or disposes an
+    /// <see cref="_inFlightMt"/> entry itself. Removal + disposal is left entirely to
+    /// <see cref="TranslateSegmentAsync"/> - every entry this method cancels is read by
+    /// exactly one <see cref="TranslateSegmentAsync"/> call, which is guaranteed to reach
+    /// its own cleanup on every exit path (the early-return for a segment cancelled
+    /// before its translation ever started, or the cancellation/failure/success catches
+    /// otherwise). Disposing here too raced with that method's own <c>uttCts.Token</c>
+    /// read on the translation pump's task - <see cref="CancellationTokenSource.Token"/>
+    /// throws <see cref="ObjectDisposedException"/> once <c>Dispose</c> has run, which
+    /// would fault that background task (and silently stop all further translation) for
+    /// the rest of the session.
+    /// </remarks>
     private async Task HandleBargeInAsync(ICascadeEventSink events, CancellationToken cancellationToken)
     {
         var superseded = new HashSet<string>();
 
         foreach (var sourceUtteranceId in _inFlightMt.Keys.ToArray())
         {
-            if (_inFlightMt.TryRemove(sourceUtteranceId, out var uttCts))
+            if (!_inFlightMt.TryGetValue(sourceUtteranceId, out var uttCts))
+            {
+                continue;
+            }
+
+            try
             {
                 uttCts.Cancel();
-                uttCts.Dispose();
                 superseded.Add($"{sourceUtteranceId}-target");
+            }
+            catch (ObjectDisposedException)
+            {
+                // TranslateSegmentAsync's own cleanup (RemoveInFlightMt) raced ahead of
+                // us and already disposed this entry - it finished (or otherwise exited)
+                // essentially simultaneously with this barge-in, so there is nothing
+                // left here to supersede.
             }
         }
 
@@ -636,9 +705,42 @@ public sealed class CascadePipeline(
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // A future TTS observer misbehaving shouldn't take down MT delivery to
-                // the client - just log and keep going, mirroring how STT segment
-                // observer failures are handled above.
+                // the client - just log and keep going, mirroring how observer failures
+                // are isolated everywhere else in this class.
                 logger.LogError(ex, "Translation observer threw for utterance {UtteranceId}.", chunk.SourceUtteranceId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Tells every registered <see cref="ITranslationObserver"/> that <paramref name="sourceUtteranceId"/>'s
+    /// translation ended without ever producing an <c>IsFinal</c> <see cref="TranslationChunk"/>
+    /// (code-review fix) - <see cref="TranslateSegmentAsync"/> calls this from its
+    /// barge-in-cancellation catch, its provider-failure catch, and its post-loop
+    /// superseded guard, the three exits that skip <see cref="NotifyTranslationObserversAsync"/>'s
+    /// normal final-chunk call. Without this, an observer that tracks per-utterance
+    /// state across chunks (TTS/#7's <c>TtsCascadeObserver</c>) would never learn this
+    /// utterance is done, leaking that state for the rest of the session.
+    /// </summary>
+    /// <param name="sourceUtteranceId">The <see cref="SttSegment.UtteranceId"/> whose translation was aborted.</param>
+    /// <param name="targetUtteranceId">The derived target-lane id (see <see cref="TranslateSegmentAsync"/>) that utterance's chunks used.</param>
+    /// <param name="events">Sink the observer's own cleanup (e.g. a closing <c>tts.audio.end</c>) may still need to send on.</param>
+    /// <param name="cancellationToken">Propagates session cancellation.</param>
+    private async Task NotifyTranslationObserversAbortedAsync(
+        string sourceUtteranceId, string targetUtteranceId, ICascadeEventSink events, CancellationToken cancellationToken)
+    {
+        foreach (var observer in translationObservers)
+        {
+            try
+            {
+                await observer.OnTranslationAbortedAsync(sourceUtteranceId, targetUtteranceId, events, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Mirrors NotifyTranslationObserversAsync's own isolation above - one
+                // misbehaving observer must not stop MT from moving on to the next
+                // queued utterance.
+                logger.LogError(ex, "Translation observer threw handling an aborted translation for utterance {UtteranceId}.", sourceUtteranceId);
             }
         }
     }

@@ -121,24 +121,6 @@ public interface ISttProvider
 }
 
 /// <summary>
-/// Lets a later cascade stage (machine translation in particular) observe every STT
-/// segment as it's produced, without the pipeline needing to know that stage exists.
-/// <see cref="CascadePipeline"/> forwards each segment to the client first, then to
-/// every registered observer - registering zero observers (the case until the
-/// translation stage lands) is a no-op.
-/// </summary>
-public interface ISttSegmentObserver
-{
-    /// <summary>
-    /// Called for every partial and final segment, after it has already been sent to
-    /// the client as a <c>transcript.*</c> event.
-    /// </summary>
-    /// <param name="segment">The segment that was just produced.</param>
-    /// <param name="cancellationToken">Propagates session cancellation.</param>
-    Task OnSegmentAsync(SttSegment segment, CancellationToken cancellationToken);
-}
-
-/// <summary>
 /// Thrown when an <see cref="ISttProvider"/> cannot start a stream at all - most
 /// commonly a missing API key, but also covers the initial connection to the provider
 /// failing. Distinct from <see cref="SttProviderStreamException"/>, which is for a

@@ -89,9 +89,12 @@ public class TtsCascadeObserverTests
         var sink = new FakeEventSink();
 
         // Only a partial with a complete first sentence is sent - the utterance's
-        // IsFinal chunk deliberately never arrives in this test.
+        // IsFinal chunk deliberately never arrives in this test. The trailing space
+        // after the period is what lets SentenceChunker confirm the boundary within
+        // this one delta (a boundary landing exactly at the end of buffered text is
+        // deferred until confirmed - see SentenceChunkerTests).
         await observer.OnTranslationChunkAsync(
-            new TranslationChunk("utt-1", "utt-1-target", "Hola.", IsFinal: false, "es"), sink, CancellationToken.None);
+            new TranslationChunk("utt-1", "utt-1-target", "Hola. ", IsFinal: false, "es"), sink, CancellationToken.None);
 
         var start = await sink.Sent.Reader.ReadAsync(TestTimeout());
         var frame = await sink.Binary.Reader.ReadAsync(TestTimeout());
@@ -208,6 +211,69 @@ public class TtsCascadeObserverTests
             new TranslationChunk("utt-1", "utt-1-target", "   ", IsFinal: true, "es"), sink, CancellationToken.None);
 
         await observer.DisposeAsync().AsTask().WaitAsync(TestTimeout());
+
+        Assert.Empty(ttsProvider.Requests);
+        Assert.False(sink.Sent.Reader.TryRead(out _));
+        Assert.False(sink.Binary.Reader.TryRead(out _));
+    }
+
+    /// <summary>
+    /// Confirms OnTranslationAbortedAsync - the notification CascadePipeline sends
+    /// when a machine translation failure or barge-in cancellation means an
+    /// utterance's IsFinal chunk is never coming - closes out an already-opened
+    /// tts.audio.start with a matching tts.audio.end, and fully clears this
+    /// utterance's pending/superseded bookkeeping. Without this, the client would be
+    /// left with a dangling tts.audio.start that never gets its end, and - because the
+    /// bookkeeping never clears - every later, unrelated barge-in would keep
+    /// re-reporting this already-dead utterance as newly superseded, forever.
+    /// </summary>
+    [Fact]
+    public async Task OnTranslationAbortedAsync_AfterAudioStart_SendsClosingEnd_AndClearsPendingState()
+    {
+        var ttsProvider = new FakeTtsProvider(_ => Chunks("utt-a-target", [1]));
+        var observer = new TtsCascadeObserver(ttsProvider, NullLogger<TtsCascadeObserver>.Instance);
+        var sink = new FakeEventSink();
+
+        // Trailing space confirms the sentence boundary within this one delta (a
+        // boundary landing exactly at the end of buffered text is deferred until
+        // confirmed - see SentenceChunkerTests).
+        await observer.OnTranslationChunkAsync(
+            new TranslationChunk("utt-a", "utt-a-target", "Hola. ", IsFinal: false, "es"), sink, CancellationToken.None);
+
+        var start = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.TtsAudioStart, start.Type);
+        await sink.Binary.Reader.ReadAsync(TestTimeout());
+
+        await observer.OnTranslationAbortedAsync("utt-a", "utt-a-target", sink, CancellationToken.None);
+
+        var end = await sink.Sent.Reader.ReadAsync(TestTimeout());
+        Assert.Equal(CascadeMessageTypes.TtsAudioEnd, end.Type);
+        Assert.Equal("utt-a-target", Assert.IsType<CascadeTtsAudioEndPayload>(end.Payload).UtteranceId);
+
+        // A later, unrelated barge-in must not re-report the utterance the abort
+        // already closed out - before this fix, the leaked pending-utterance entry
+        // meant every subsequent barge-in kept re-including it.
+        var superseded = await observer.OnBargeInAsync(sink, CancellationToken.None);
+        Assert.Empty(superseded);
+
+        await observer.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Confirms OnTranslationAbortedAsync for an utterance that never got far enough
+    /// to send tts.audio.start (machine translation failed on its very first token) is
+    /// a clean no-op - no stray tts.audio.end for an utterance the client never heard
+    /// tts.audio.start for in the first place.
+    /// </summary>
+    [Fact]
+    public async Task OnTranslationAbortedAsync_BeforeAnyAudioStart_SendsNoEvents()
+    {
+        var ttsProvider = new FakeTtsProvider(_ => Chunks("utt-a-target", [1]));
+        var observer = new TtsCascadeObserver(ttsProvider, NullLogger<TtsCascadeObserver>.Instance);
+        var sink = new FakeEventSink();
+
+        await observer.OnTranslationAbortedAsync("utt-a", "utt-a-target", sink, CancellationToken.None);
+        await observer.DisposeAsync();
 
         Assert.Empty(ttsProvider.Requests);
         Assert.False(sink.Sent.Reader.TryRead(out _));

@@ -18,18 +18,59 @@ public class SentenceChunkerTests
     }
 
     /// <summary>
-    /// Confirms a delta that completes a sentence returns exactly that phrase,
-    /// trimmed - the core behavior TTS/#7 depends on to start synthesizing before an
-    /// utterance's whole translation has streamed in.
+    /// Confirms a delta that completes a sentence - with more text already following
+    /// the sentence-ending punctuation in the same delta - returns exactly that
+    /// phrase, trimmed, in the same call. The core behavior TTS/#7 depends on to start
+    /// synthesizing before an utterance's whole translation has streamed in.
     /// </summary>
     [Fact]
     public void Append_CompletesSentence_ReturnsTrimmedPhrase()
     {
         var chunker = new SentenceChunker();
 
-        var phrases = chunker.Append("Hello there.");
+        var phrases = chunker.Append("Hello there. ");
 
         Assert.Equal(["Hello there."], phrases);
+    }
+
+    /// <summary>
+    /// Confirms a sentence-ending boundary landing exactly at the end of the buffered
+    /// text is NOT reported yet - it might still be extended by more punctuation in
+    /// the very next delta (see the boundary-run-split-across-deltas test below) - and
+    /// only resolves once the utterance ends and Flush() claims it.
+    /// </summary>
+    [Fact]
+    public void Append_BoundaryAtEndOfBuffer_DefersUntilConfirmedOrFlushed()
+    {
+        var chunker = new SentenceChunker();
+
+        var phrases = chunker.Append("Hello there.");
+
+        Assert.Empty(phrases);
+        Assert.Equal("Hello there.", chunker.Flush());
+    }
+
+    /// <summary>
+    /// Confirms a boundary run split across two deltas - the run's tail landing
+    /// exactly at the end of one delta, then continuing as pure punctuation at the
+    /// start of the next - never reports a punctuation-only phrase for the second
+    /// delta. Without the fix this guards, TtsCascadeObserver would dispatch a
+    /// nonsensical "." synthesis request to TTS (text-to-speech) every time an
+    /// ellipsis (or any other multi-character boundary run) happened to be split by a
+    /// token delta boundary.
+    /// </summary>
+    [Fact]
+    public void Append_BoundaryRunSplitAcrossDeltas_NeverReportsPunctuationOnlyPhrase()
+    {
+        var chunker = new SentenceChunker();
+
+        var first = chunker.Append("Hi..");
+        Assert.Empty(first);
+
+        var second = chunker.Append(".");
+        Assert.Empty(second);
+
+        Assert.Equal("Hi...", chunker.Flush());
     }
 
     /// <summary>
@@ -44,7 +85,7 @@ public class SentenceChunkerTests
 
         Assert.Empty(chunker.Append("Hola"));
         Assert.Empty(chunker.Append(" mun"));
-        var phrases = chunker.Append("do.");
+        var phrases = chunker.Append("do. ");
 
         Assert.Equal(["Hola mundo."], phrases);
     }
@@ -58,7 +99,7 @@ public class SentenceChunkerTests
     {
         var chunker = new SentenceChunker();
 
-        var phrases = chunker.Append("Hi. Bye!");
+        var phrases = chunker.Append("Hi. Bye! ");
 
         Assert.Equal(["Hi.", "Bye!"], phrases);
     }
@@ -76,7 +117,7 @@ public class SentenceChunkerTests
 
         Assert.Equal(["Done."], phrases);
 
-        var next = chunker.Append(" more.");
+        var next = chunker.Append(" more. ");
         Assert.Equal(["And then more."], next);
     }
 
@@ -105,7 +146,7 @@ public class SentenceChunkerTests
     public void Flush_EmptyBuffer_ReturnsNull()
     {
         var chunker = new SentenceChunker();
-        chunker.Append("Complete sentence.");
+        chunker.Append("Complete sentence. ");
 
         var remainder = chunker.Flush();
 
@@ -138,7 +179,7 @@ public class SentenceChunkerTests
     {
         var chunker = new SentenceChunker();
 
-        var phrases = chunker.Append("Wait... really?");
+        var phrases = chunker.Append("Wait... really? ");
 
         Assert.Equal(["Wait...", "really?"], phrases);
     }

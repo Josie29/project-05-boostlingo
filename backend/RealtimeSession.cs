@@ -41,9 +41,7 @@ public static class RealtimeSessionEndpoints
             ? RealtimeInterpreterSession.DefaultTargetLangCode
             : request.TargetLang;
 
-        var sourceLang = Languages.Find(sourceLangCode);
-        var targetLang = Languages.Find(targetLangCode);
-        if (sourceLang is null || targetLang is null || sourceLangCode == targetLangCode)
+        if (!Languages.IsSupportedPair(sourceLangCode, targetLangCode))
         {
             logger.LogWarning(
                 "Rejected {Route}: unsupported language pair '{SourceLang}' -> '{TargetLang}'.",
@@ -54,6 +52,13 @@ public static class RealtimeSessionEndpoints
                 new RealtimeSessionErrorResponse($"Unsupported language pair '{sourceLangCode}' -> '{targetLangCode}'."),
                 statusCode: StatusCodes.Status400BadRequest);
         }
+
+        // IsSupportedPair above already guarantees both codes are registered - the
+        // null-forgiving lookups here just fetch the LanguageInfo the rest of this
+        // method needs (code-review fix: avoids re-implementing IsSupportedPair's own
+        // "both codes registered and distinct" check inline).
+        var sourceLang = Languages.Find(sourceLangCode)!;
+        var targetLang = Languages.Find(targetLangCode)!;
 
         if (string.IsNullOrWhiteSpace(configuration["OPENAI_API_KEY"]))
         {
