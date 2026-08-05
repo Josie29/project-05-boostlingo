@@ -9,7 +9,7 @@
 
 /**
  * Converts signed 16-bit little-endian PCM samples (the exact wire format
- * `TtsAudioFormat` sends — see `backend/CascadeAudioSession.cs`) into mono
+ * the provider's `TtsOutputFormat` declares — see `backend/CascadeProtocol.cs`) into mono
  * Float32 samples in [-1, 1], the range Web Audio's `AudioBuffer` expects.
  *
  * Exact inverse of `audioEncoding.ts`'s `float32ToPcm16Le`: negative and

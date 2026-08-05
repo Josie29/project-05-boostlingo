@@ -31,9 +31,9 @@ public class TtsCascadeObserverTests
         Assert.Equal(CascadeMessageTypes.TtsAudioStart, start.Type);
         var startPayload = Assert.IsType<CascadeTtsAudioStartPayload>(start.Payload);
         Assert.Equal("utt-1-target", startPayload.UtteranceId);
-        Assert.Equal(TtsAudioFormat.SampleRateHz, startPayload.SampleRateHz);
-        Assert.Equal(TtsAudioFormat.Encoding, startPayload.Encoding);
-        Assert.Equal(TtsAudioFormat.Channels, startPayload.Channels);
+        Assert.Equal(TtsOutputFormat.Pcm16Mono24k.SampleRateHz, startPayload.SampleRateHz);
+        Assert.Equal(TtsOutputFormat.Pcm16Mono24k.Encoding, startPayload.Encoding);
+        Assert.Equal(TtsOutputFormat.Pcm16Mono24k.Channels, startPayload.Channels);
 
         Assert.Equal(new byte[] { 1, 2 }, frame1);
         Assert.Equal(new byte[] { 3, 4 }, frame2);
@@ -346,6 +346,8 @@ file sealed class FakeEventSink : ICascadeEventSink
 /// </summary>
 file sealed class FakeTtsProvider(Func<TtsRequest, IAsyncEnumerable<TtsAudioChunk>> respond) : ITtsProvider
 {
+    public TtsOutputFormat OutputFormat => TtsOutputFormat.Pcm16Mono24k;
+
     public List<TtsRequest> Requests { get; } = [];
 
     public IAsyncEnumerable<TtsAudioChunk> SynthesizeAsync(TtsRequest request, CancellationToken cancellationToken)

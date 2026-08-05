@@ -24,35 +24,31 @@ public sealed record TtsRequest(string UtteranceId, string Text, string TargetLa
 /// </summary>
 /// <param name="UtteranceId">Echoes <see cref="TtsRequest.UtteranceId"/> for the request
 /// this chunk was produced from.</param>
-/// <param name="Pcm">Raw audio samples, encoded per <see cref="TtsAudioFormat"/>.</param>
+/// <param name="Pcm">Raw audio samples, encoded per the producing provider's <see cref="ITtsProvider.OutputFormat"/>.</param>
 public sealed record TtsAudioChunk(string UtteranceId, ReadOnlyMemory<byte> Pcm);
 
 /// <summary>
-/// The audio format every <see cref="ITtsProvider"/> implementation must emit. Echoed
-/// downstream in the <c>tts.audio.start</c> event (see <see cref="CascadeTtsAudioStartPayload"/>)
-/// so the frontend playback queue knows exactly how to interpret and resample the raw
-/// binary frames that follow.
+/// The audio format a specific <see cref="ITtsProvider"/> emits its
+/// <see cref="TtsAudioChunk"/>s in. A per-provider capability
+/// (<see cref="ITtsProvider.OutputFormat"/>) rather than a global constant: providers
+/// synthesize at their own native rates, and forcing one shared format on the
+/// abstraction would make a non-24kHz provider (e.g. ElevenLabs) resample server-side -
+/// exactly the latency cost the cascade avoids by having the frontend playback queue
+/// resample instead. Echoed downstream in the <c>tts.audio.start</c> event (see
+/// <see cref="CascadeTtsAudioStartPayload"/>) so the client knows how to interpret the
+/// raw binary frames that follow.
 /// </summary>
-/// <remarks>
-/// 24 kHz - not the 16 kHz <see cref="CascadeAudioFormat"/> uses for upstream mic audio -
-/// because that is the native PCM (Pulse Code Modulation) output rate OpenAI's TTS
-/// models produce. Resampling on the server would cost latency for no quality benefit,
-/// so the frontend's playback queue is the one that resamples, same tradeoff
-/// <see cref="CascadeAudioFormat"/>'s own remarks call out for the upstream direction.
-/// </remarks>
-public static class TtsAudioFormat
+/// <param name="SampleRateHz">Samples per second every chunk is encoded at.</param>
+/// <param name="BitsPerSample">Bits per sample. Signed, little-endian.</param>
+/// <param name="Channels">Audio channel count.</param>
+/// <param name="Encoding">Wire-format identifier for the encoding, echoed in the
+/// <c>tts.audio.start</c> event.</param>
+public sealed record TtsOutputFormat(int SampleRateHz, int BitsPerSample, int Channels, string Encoding)
 {
-    /// <summary>Samples per second every <see cref="TtsAudioChunk"/> is encoded at.</summary>
-    public const int SampleRateHz = 24_000;
-
-    /// <summary>Bits per sample. Signed, little-endian.</summary>
-    public const int BitsPerSample = 16;
-
-    /// <summary>Audio channels. Mono only.</summary>
-    public const int Channels = 1;
-
-    /// <summary>Wire-format identifier for the encoding, echoed in the <c>tts.audio.start</c> event.</summary>
-    public const string Encoding = "pcm16";
+    /// <summary>16-bit little-endian mono PCM (Pulse Code Modulation) at 24 kHz - the
+    /// native output rate of OpenAI's TTS models.</summary>
+    public static TtsOutputFormat Pcm16Mono24k { get; } =
+        new(SampleRateHz: 24_000, BitsPerSample: 16, Channels: 1, Encoding: "pcm16");
 }
 
 /// <summary>
@@ -64,6 +60,14 @@ public static class TtsAudioFormat
 /// </summary>
 public interface ITtsProvider
 {
+    /// <summary>
+    /// The format every chunk from <see cref="SynthesizeAsync"/> is encoded in - fixed
+    /// for a given provider, surfaced here so the transport can tell the client how to
+    /// decode the audio without the abstraction pinning all providers to one vendor's
+    /// native rate.
+    /// </summary>
+    TtsOutputFormat OutputFormat { get; }
+
     /// <summary>
     /// Synthesizes one phrase of target-language text, streaming audio as it becomes
     /// available rather than waiting for the whole phrase's audio to finish - callers

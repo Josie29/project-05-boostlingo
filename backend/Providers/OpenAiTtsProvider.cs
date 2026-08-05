@@ -43,6 +43,12 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
     private const int ReadBufferBytes = 4096;
 
     /// <inheritdoc />
+    /// <remarks>OpenAI's TTS models natively emit 24 kHz PCM; declaring that here
+    /// (rather than resampling server-side to some shared rate) keeps synthesis
+    /// latency down and lets the frontend playback queue do the one resample.</remarks>
+    public TtsOutputFormat OutputFormat => TtsOutputFormat.Pcm16Mono24k;
+
+    /// <inheritdoc />
     /// <exception cref="TtsProviderException">Thrown when <c>OPENAI_API_KEY</c> is not
     /// configured, the request fails outright (network error or non-success status)
     /// even after one retry, or the response stream drops before it signals

@@ -785,6 +785,8 @@ file sealed class FakeTranslationProvider(Func<TranslationRequest, IAsyncEnumera
 /// </summary>
 file sealed class FakeTtsProvider(Func<TtsRequest, IAsyncEnumerable<TtsAudioChunk>> respond) : ITtsProvider
 {
+    public TtsOutputFormat OutputFormat => TtsOutputFormat.Pcm16Mono24k;
+
     public IAsyncEnumerable<TtsAudioChunk> SynthesizeAsync(TtsRequest request, CancellationToken cancellationToken) =>
         respond(request);
 }

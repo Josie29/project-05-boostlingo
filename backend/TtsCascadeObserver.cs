@@ -358,7 +358,10 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
             await events.SendEventAsync(
                 CascadeMessageTypes.TtsAudioStart,
                 new CascadeTtsAudioStartPayload(
-                    chunk.TargetUtteranceId, TtsAudioFormat.SampleRateHz, TtsAudioFormat.Encoding, TtsAudioFormat.Channels),
+                    chunk.TargetUtteranceId,
+                    _ttsProvider.OutputFormat.SampleRateHz,
+                    _ttsProvider.OutputFormat.Encoding,
+                    _ttsProvider.OutputFormat.Channels),
                 cancellationToken);
             startAlreadySent = true;
         }

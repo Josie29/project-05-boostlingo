@@ -369,9 +369,9 @@ public sealed record CascadeTranscriptPayload(string UtteranceId, string Lane, s
 /// <param name="UtteranceId">The target-lane utterance id (see <see cref="CascadeTranscriptPayload.UtteranceId"/>
 /// on the <see cref="CascadeTranscriptLanes.Target"/> lane) this audio is the spoken
 /// rendering of.</param>
-/// <param name="SampleRateHz">Samples per second the binary frames are encoded at; see <see cref="TtsAudioFormat"/>.</param>
-/// <param name="Encoding">Sample encoding of the binary frames; see <see cref="TtsAudioFormat"/>.</param>
-/// <param name="Channels">Audio channel count of the binary frames; see <see cref="TtsAudioFormat"/>.</param>
+/// <param name="SampleRateHz">Samples per second the binary frames are encoded at; see <see cref="TtsOutputFormat"/>.</param>
+/// <param name="Encoding">Sample encoding of the binary frames; see <see cref="TtsOutputFormat"/>.</param>
+/// <param name="Channels">Audio channel count of the binary frames; see <see cref="TtsOutputFormat"/>.</param>
 public sealed record CascadeTtsAudioStartPayload(string UtteranceId, int SampleRateHz, string Encoding, int Channels);
 
 /// <summary>

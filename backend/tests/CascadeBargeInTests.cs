@@ -280,6 +280,8 @@ file sealed class GatedForeverAudioStream(string utteranceId)
 /// </summary>
 file sealed class FakeCancelAwareTtsProvider(Func<TtsRequest, CancellationToken, IAsyncEnumerable<TtsAudioChunk>> respond) : ITtsProvider
 {
+    public TtsOutputFormat OutputFormat => TtsOutputFormat.Pcm16Mono24k;
+
     public List<TtsRequest> Requests { get; } = [];
 
     public IAsyncEnumerable<TtsAudioChunk> SynthesizeAsync(TtsRequest request, CancellationToken cancellationToken)
