@@ -58,7 +58,10 @@ public class OpenAiSttProviderTests
         var socket = Assert.Single(socketFactory.CreatedSockets);
         Assert.Equal("Bearer sk-test", socket.ConnectHeaders["Authorization"]);
         var sessionUpdate = Assert.Single(socket.SentText);
-        Assert.Contains("transcription_session.update", sessionUpdate);
+        Assert.Contains("\"type\":\"session.update\"", sessionUpdate);
+        Assert.Contains("\"type\":\"transcription\"", sessionUpdate);
+        Assert.Contains("\"type\":\"audio/pcm\"", sessionUpdate);
+        Assert.Contains($"\"rate\":{CascadeAudioFormat.SampleRateHz}", sessionUpdate);
         Assert.Contains(OpenAiSttProvider.Model, sessionUpdate);
         Assert.Contains(OpenAiSttProvider.VadType, sessionUpdate);
     }

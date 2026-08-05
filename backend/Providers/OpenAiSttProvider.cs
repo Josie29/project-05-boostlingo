@@ -100,9 +100,11 @@ public sealed class OpenAiSttProvider(
 
     private static OpenAiTranscriptionSessionUpdate BuildSessionUpdate(SttStreamConfig config) => new(
         new OpenAiTranscriptionSessionConfig(
-            InputAudioFormat: "pcm16",
-            InputAudioTranscription: new OpenAiInputAudioTranscriptionConfig(Model, config.SourceLang),
-            TurnDetection: new OpenAiTurnDetectionConfig(VadType)));
+            new OpenAiTranscriptionAudioConfig(
+                new OpenAiTranscriptionAudioInputConfig(
+                    Format: new OpenAiAudioFormatConfig(CascadeAudioFormat.SampleRateHz),
+                    Transcription: new OpenAiInputAudioTranscriptionConfig(Model, config.SourceLang),
+                    TurnDetection: new OpenAiTurnDetectionConfig(VadType)))));
 
     /// <summary>
     /// One open OpenAI transcription WebSocket, wrapped as an <see cref="ISttStream"/>.
@@ -247,13 +249,37 @@ internal sealed record OpenAiTranscriptionSessionUpdate(
     [property: JsonPropertyName("session")] OpenAiTranscriptionSessionConfig Session)
 {
     [JsonPropertyName("type")]
-    public string Type => "transcription_session.update";
+    public string Type => "session.update";
 }
 
+/// <summary>
+/// The unified Realtime API (as of the 2025 session-shape change) nests transcription
+/// config under session.audio.input instead of the old flat
+/// input_audio_format/input_audio_transcription fields, and the event itself is a
+/// generic "session.update" discriminated by this "type": "transcription", not the
+/// retired "transcription_session.update" event type.
+/// </summary>
 internal sealed record OpenAiTranscriptionSessionConfig(
-    [property: JsonPropertyName("input_audio_format")] string InputAudioFormat,
-    [property: JsonPropertyName("input_audio_transcription")] OpenAiInputAudioTranscriptionConfig InputAudioTranscription,
+    [property: JsonPropertyName("audio")] OpenAiTranscriptionAudioConfig Audio)
+{
+    [JsonPropertyName("type")]
+    public string Type => "transcription";
+}
+
+internal sealed record OpenAiTranscriptionAudioConfig(
+    [property: JsonPropertyName("input")] OpenAiTranscriptionAudioInputConfig Input);
+
+internal sealed record OpenAiTranscriptionAudioInputConfig(
+    [property: JsonPropertyName("format")] OpenAiAudioFormatConfig Format,
+    [property: JsonPropertyName("transcription")] OpenAiInputAudioTranscriptionConfig Transcription,
     [property: JsonPropertyName("turn_detection")] OpenAiTurnDetectionConfig TurnDetection);
+
+internal sealed record OpenAiAudioFormatConfig(
+    [property: JsonPropertyName("rate")] int Rate)
+{
+    [JsonPropertyName("type")]
+    public string Type => "audio/pcm";
+}
 
 internal sealed record OpenAiInputAudioTranscriptionConfig(
     [property: JsonPropertyName("model")] string Model,

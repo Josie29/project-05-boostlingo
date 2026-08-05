@@ -59,15 +59,16 @@ public static class CascadeAudioEndpoints
 
 /// <summary>
 /// The PCM audio format every cascade session speaks upstream (browser to server).
-/// 16 kHz was chosen over 24 kHz because it's the lowest common denominator speech
-/// providers (including OpenAI's transcription models) accept without upsampling,
-/// and it halves the bandwidth/CPU cost of the frontend's AudioWorklet resampler
-/// relative to 24 kHz for no meaningful loss in speech recognition quality.
+/// 24 kHz, not the originally assumed 16 kHz: OpenAI's realtime transcription intent
+/// (<c>OpenAiSttProvider</c>) rejects <c>session.audio.input.format.rate</c> below
+/// 24000 with <c>integer_below_min_value</c> - spot-checked directly against a live
+/// key, not documentation. Matches <see cref="ITtsProvider.SampleRateHz"/> on the
+/// output side, so the cascade speaks one rate end to end.
 /// </summary>
 public static class CascadeAudioFormat
 {
     /// <summary>Samples per second. The frontend must downsample the mic input to this rate.</summary>
-    public const int SampleRateHz = 16_000;
+    public const int SampleRateHz = 24_000;
 
     /// <summary>Bits per sample. Signed, little-endian.</summary>
     public const int BitsPerSample = 16;

@@ -81,7 +81,7 @@ function completeHandshake(ws: FakeWebSocket): void {
     data: JSON.stringify({
       v: 1,
       type: 'session.ready',
-      payload: { sampleRateHz: 16000, encoding: 'pcm16', channels: 1 },
+      payload: { sampleRateHz: 24000, encoding: 'pcm16', channels: 1 },
     }),
   });
 }
@@ -205,7 +205,7 @@ describe('CascadeSessionController', () => {
     expect(capture.start).not.toHaveBeenCalled();
 
     ws.onmessage?.({
-      data: JSON.stringify({ v: 1, type: 'session.ready', payload: { sampleRateHz: 16000, encoding: 'pcm16', channels: 1 } }),
+      data: JSON.stringify({ v: 1, type: 'session.ready', payload: { sampleRateHz: 24000, encoding: 'pcm16', channels: 1 } }),
     });
     await startPromise;
 
@@ -581,7 +581,7 @@ describe('CascadeSessionController', () => {
     expect(events).toContainEqual({
       v: 1,
       type: 'session.ready',
-      payload: { sampleRateHz: 16000, encoding: 'pcm16', channels: 1 },
+      payload: { sampleRateHz: 24000, encoding: 'pcm16', channels: 1 },
     });
   });
 

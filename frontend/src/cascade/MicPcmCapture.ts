@@ -8,14 +8,14 @@ const WORKLET_MODULE_URL = '/cascade-pcm-worklet.js';
 const WORKLET_PROCESSOR_NAME = 'cascade-pcm-capture';
 
 /** Target sample rate every cascade session streams at; matches `CascadeAudioFormat.SampleRateHz` in `backend/CascadeAudioSession.cs`. */
-const TARGET_SAMPLE_RATE_HZ = 16_000;
+const TARGET_SAMPLE_RATE_HZ = 24_000;
 
 /**
  * Default `CascadeAudioCapture`: captures the mic through a real
  * AudioContext + AudioWorkletNode. The worklet itself only buffers raw
  * Float32 frames at the context's native sample rate (see the module-level
  * comment in `public/cascade-pcm-worklet.js` for why the worklet can't do
- * the DSP itself); downsampling to 16kHz and the Float32->PCM16 conversion
+ * the DSP itself); downsampling to `TARGET_SAMPLE_RATE_HZ` and the Float32->PCM16 conversion
  * happen here, on the main thread, via `audioEncoding.ts`'s pure functions.
  *
  * Not itself unit tested — jsdom (the test environment) implements neither

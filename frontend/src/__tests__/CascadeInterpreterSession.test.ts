@@ -55,7 +55,7 @@ function completeHandshake(ws: FakeWebSocket): void {
   ws.readyState = WebSocket.OPEN;
   ws.onopen?.();
   ws.onmessage?.({
-    data: JSON.stringify({ v: 1, type: 'session.ready', payload: { sampleRateHz: 16000, encoding: 'pcm16', channels: 1 } }),
+    data: JSON.stringify({ v: 1, type: 'session.ready', payload: { sampleRateHz: 24000, encoding: 'pcm16', channels: 1 } }),
   });
 }
 
