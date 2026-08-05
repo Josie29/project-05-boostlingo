@@ -44,7 +44,7 @@ MVP-testable. Both modes (Realtime and Cascade) are wired end to end.
 
 ```bash
 cd backend
-cp ../.env.example ../.env   # if you haven't already; fill in OPENAI_API_KEY
+cp ../.env.example ../.env   # fill in OPENAI_API_KEY
 dotnet run
 ```
 

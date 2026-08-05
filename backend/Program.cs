@@ -1,3 +1,6 @@
+// Load repo-root .env before config is built; real shell env vars still win.
+DotNetEnv.Env.TraversePath().NoClobber().Load();
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Typed HttpClient for minting ephemeral OpenAI Realtime client secrets. The

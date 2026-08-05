@@ -18,5 +18,8 @@
     <Content Remove="tests/**/*" />
     <None Remove="tests/**/*" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="DotNetEnv" Version="3.2.0" />
+  </ItemGroup>
 
 </Project>
