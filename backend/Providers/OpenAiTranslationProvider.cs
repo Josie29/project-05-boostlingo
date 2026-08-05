@@ -1,5 +1,4 @@
 using System.IO;
-using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
@@ -36,13 +35,6 @@ public sealed class OpenAiTranslationProvider(
     /// </summary>
     private static readonly JsonSerializerOptions OpenAiJsonOptions = new();
 
-    /// <summary>
-    /// One-retry-only backoff (#12, error handling hardening) between the initial
-    /// attempt and its single retry - short enough not to meaningfully add to
-    /// end-to-end cascade latency, long enough to ride out a brief provider hiccup.
-    /// </summary>
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(500);
-
     /// <inheritdoc />
     /// <exception cref="TranslationProviderException">Thrown when <c>OPENAI_API_KEY</c>
     /// is not configured, the request fails outright (network error or non-success
@@ -51,13 +43,29 @@ public sealed class OpenAiTranslationProvider(
     public async IAsyncEnumerable<string> TranslateAsync(
         TranslationRequest request, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(request.SourceText))
+        {
+            // Nothing to translate - mirrors OpenAiTtsProvider's blank-text guard;
+            // CascadePipeline already filters blank segments, but a blank slipping
+            // through should not cost a provider round trip.
+            yield break;
+        }
+
         var apiKey = configuration["OPENAI_API_KEY"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
             throw new TranslationProviderException("The server is not configured with an OpenAI API key.");
         }
 
-        var response = await SendWithOneRetryAsync(request, apiKey, cancellationToken);
+        var response = await OpenAiHttpRetry.SendWithOneRetryAsync(
+            httpClient,
+            () => BuildRequest(request, apiKey),
+            stageName: "Machine translation",
+            wrapException: static (message, inner) => inner is null
+                ? new TranslationProviderException(message)
+                : new TranslationProviderException(message, inner),
+            logger,
+            cancellationToken);
 
         using (response)
         {
@@ -71,8 +79,13 @@ public sealed class OpenAiTranslationProvider(
                 {
                     line = await reader.ReadLineAsync(cancellationToken);
                 }
-                catch (IOException ex)
+                catch (Exception ex) when (ex is IOException
+                    || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
                 {
+                    // The OperationCanceledException arm covers HttpClient.Timeout
+                    // expiring mid-body (it still governs reads after
+                    // ResponseHeadersRead) - the caller's own token isn't cancelled,
+                    // so this is a provider failure, not caller cancellation.
                     throw new TranslationProviderException("Machine translation connection dropped mid-stream.", ex);
                 }
 
@@ -96,100 +109,26 @@ public sealed class OpenAiTranslationProvider(
                     yield break;
                 }
 
-                var token = ParseDeltaToken(data);
+                string? token;
+                try
+                {
+                    token = ParseDeltaToken(data);
+                }
+                catch (JsonException ex)
+                {
+                    // A malformed frame is skipped rather than allowed to escape as an
+                    // undocumented exception type - the rest of the stream may still
+                    // be usable, and the [DONE]/EOF handling above ends it cleanly.
+                    logger.LogWarning(ex, "Skipping a malformed SSE frame from the machine translation stream.");
+                    continue;
+                }
+
                 if (!string.IsNullOrEmpty(token))
                 {
                     yield return token;
                 }
             }
         }
-    }
-
-    /// <summary>
-    /// Sends the chat completion request, retrying exactly once (#12, error handling
-    /// hardening) if the first attempt fails transiently: a connection failure, a
-    /// request timeout, a 429 (rate limited), or any 5xx. A 4xx other than 429 (auth or
-    /// validation - retrying would fail identically) throws immediately with no retry.
-    /// The retry always builds a brand-new <see cref="HttpRequestMessage"/> - an
-    /// <see cref="HttpRequestMessage"/> can only ever be sent once - so nothing from
-    /// this method's caller has read any part of the response body yet by the time a
-    /// retry happens, meaning a retry here can never duplicate already-streamed tokens.
-    /// </summary>
-    /// <param name="request">The source text and language pair to translate.</param>
-    /// <param name="apiKey">The bearer token to authenticate with.</param>
-    /// <param name="cancellationToken">Propagates cancellation of either attempt.</param>
-    /// <returns>The successful response, with headers already read (but the body not
-    /// yet consumed) - the caller owns disposing it.</returns>
-    /// <exception cref="TranslationProviderException">Thrown when both the initial
-    /// attempt and the retry fail, or the first attempt fails non-transiently.</exception>
-    private async Task<HttpResponseMessage> SendWithOneRetryAsync(
-        TranslationRequest request, string apiKey, CancellationToken cancellationToken)
-    {
-        const int maxAttempts = 2;
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            using var httpRequest = BuildRequest(request, apiKey);
-            HttpResponseMessage response;
-
-            try
-            {
-                response = await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            }
-            catch (HttpRequestException ex) when (attempt < maxAttempts)
-            {
-                logger.LogWarning(
-                    ex, "Machine translation request failed to connect (attempt {Attempt}); retrying once.", attempt);
-                await Task.Delay(RetryDelay, cancellationToken);
-                continue;
-            }
-            catch (HttpRequestException ex)
-            {
-                throw new TranslationProviderException("Failed to connect to the machine translation provider.", ex);
-            }
-            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
-            {
-                logger.LogWarning(ex, "Machine translation request timed out (attempt {Attempt}); retrying once.", attempt);
-                await Task.Delay(RetryDelay, cancellationToken);
-                continue;
-            }
-            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                throw new TranslationProviderException("Machine translation request timed out.", ex);
-            }
-
-            if (response.IsSuccessStatusCode)
-            {
-                return response;
-            }
-
-            var isTransient = response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500;
-            if (isTransient && attempt < maxAttempts)
-            {
-                if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                {
-                    logger.LogWarning("Machine translation request was rate-limited (429); retrying once.");
-                }
-                else
-                {
-                    logger.LogWarning(
-                        "Machine translation request failed transiently ({StatusCode}); retrying once.",
-                        (int)response.StatusCode);
-                }
-
-                response.Dispose();
-                await Task.Delay(RetryDelay, cancellationToken);
-                continue;
-            }
-
-            var statusCode = (int)response.StatusCode;
-            response.Dispose();
-            throw new TranslationProviderException($"Machine translation request failed with status {statusCode}.");
-        }
-
-        // Unreachable: every loop iteration either returns, throws, or retries, and
-        // maxAttempts bounds the number of retries - kept only so the compiler sees
-        // every path as returning or throwing.
-        throw new TranslationProviderException("Machine translation request failed after retrying.");
     }
 
     private static HttpRequestMessage BuildRequest(TranslationRequest request, string apiKey)

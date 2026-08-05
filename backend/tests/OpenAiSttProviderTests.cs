@@ -1,3 +1,4 @@
+using System.Net.WebSockets;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -233,6 +234,91 @@ public class OpenAiSttProviderTests
         Assert.False(marker.IsFinal);
     }
 
+    /// <summary>
+    /// Confirms a malformed (non-JSON) text frame from the provider is logged and
+    /// skipped, and enumeration keeps going to the next valid segment - without this,
+    /// one garbled frame from OpenAI would fault the whole segment pump and kill STT
+    /// for the rest of the session instead of just losing that one frame.
+    /// </summary>
+    [Fact]
+    public async Task ReadSegmentsAsync_MalformedFrame_IsSkipped_AndEnumerationContinues()
+    {
+        var socketFactory = new FakeRealtimeSocketFactory();
+        var provider = CreateProvider(socketFactory, apiKey: "sk-test");
+        var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
+        var socket = socketFactory.CreatedSockets[0];
+
+        socket.EnqueueIncoming("not valid json at all");
+        socket.EnqueueIncoming(
+            """{"type":"conversation.item.input_audio_transcription.completed","item_id":"item-1","transcript":"Hello"}""");
+        socket.EnqueueIncoming(null);
+
+        var segments = new List<SttSegment>();
+        await foreach (var segment in stream.ReadSegmentsAsync(CancellationToken.None))
+        {
+            segments.Add(segment);
+        }
+
+        var onlySegment = Assert.Single(segments);
+        Assert.Equal("item-1", onlySegment.UtteranceId);
+        Assert.Equal("Hello", onlySegment.Text);
+        Assert.True(onlySegment.IsFinal);
+    }
+
+    /// <summary>
+    /// Confirms a transcription delta frame missing item_id is skipped - producing no
+    /// segment at all - rather than falling back to some shared/empty id that would
+    /// cross-contaminate the replace-not-append transcript handling and latency marks
+    /// a real item_id keys by.
+    /// </summary>
+    [Fact]
+    public async Task ReadSegmentsAsync_DeltaFrameMissingItemId_ProducesNoSegment()
+    {
+        var socketFactory = new FakeRealtimeSocketFactory();
+        var provider = CreateProvider(socketFactory, apiKey: "sk-test");
+        var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
+        var socket = socketFactory.CreatedSockets[0];
+
+        socket.EnqueueIncoming("""{"type":"conversation.item.input_audio_transcription.delta","delta":"Hel"}""");
+        socket.EnqueueIncoming(null);
+
+        var segments = new List<SttSegment>();
+        await foreach (var segment in stream.ReadSegmentsAsync(CancellationToken.None))
+        {
+            segments.Add(segment);
+        }
+
+        Assert.Empty(segments);
+    }
+
+    /// <summary>
+    /// Confirms a WebSocketException from the underlying socket's receive surfaces as
+    /// SttProviderStreamException with the original exception preserved as
+    /// InnerException - CascadePipeline's mid-session STT reopen logic (#12) logs that
+    /// inner exception, and losing it would leave an operator with no way to diagnose
+    /// why a stream actually dropped.
+    /// </summary>
+    [Fact]
+    public async Task ReadSegmentsAsync_WebSocketExceptionFromReceive_SurfacesAsStreamException_WithInnerExceptionPreserved()
+    {
+        var socketFactory = new FakeRealtimeSocketFactory();
+        var provider = CreateProvider(socketFactory, apiKey: "sk-test");
+        var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
+        var socket = socketFactory.CreatedSockets[0];
+
+        var originalException = new WebSocketException("connection reset");
+        socket.EnqueueException(originalException);
+
+        var ex = await Assert.ThrowsAsync<SttProviderStreamException>(async () =>
+        {
+            await foreach (var _ in stream.ReadSegmentsAsync(CancellationToken.None))
+            {
+            }
+        });
+
+        Assert.Same(originalException, ex.InnerException);
+    }
+
     private static OpenAiSttProvider CreateProvider(
         IRealtimeSocketFactory socketFactory, string? apiKey, TimeSpan? connectTimeout = null)
     {
@@ -269,6 +355,7 @@ file sealed class FakeRealtimeSocketFactory : IRealtimeSocketFactory
 file sealed class FakeRealtimeSocket : IRealtimeSocket
 {
     private readonly Queue<string?> _incoming = new();
+    private Exception? _exceptionToThrowOnReceive;
 
     public IReadOnlyDictionary<string, string> ConnectHeaders { get; private set; } = new Dictionary<string, string>();
 
@@ -280,6 +367,11 @@ file sealed class FakeRealtimeSocket : IRealtimeSocket
     public TimeSpan ConnectDelay { get; set; } = TimeSpan.Zero;
 
     public void EnqueueIncoming(string? json) => _incoming.Enqueue(json);
+
+    /// <summary>Makes the next <see cref="ReceiveTextAsync"/> call throw
+    /// <paramref name="exception"/> instead of returning a frame - simulates the
+    /// underlying WebSocket dropping mid-session.</summary>
+    public void EnqueueException(Exception exception) => _exceptionToThrowOnReceive = exception;
 
     public async Task ConnectAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
@@ -296,8 +388,16 @@ file sealed class FakeRealtimeSocket : IRealtimeSocket
         return Task.CompletedTask;
     }
 
-    public Task<string?> ReceiveTextAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(_incoming.Count > 0 ? _incoming.Dequeue() : null);
+    public Task<string?> ReceiveTextAsync(CancellationToken cancellationToken)
+    {
+        if (_exceptionToThrowOnReceive is { } exception)
+        {
+            _exceptionToThrowOnReceive = null;
+            throw exception;
+        }
+
+        return Task.FromResult(_incoming.Count > 0 ? _incoming.Dequeue() : null);
+    }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

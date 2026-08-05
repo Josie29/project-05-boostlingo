@@ -106,7 +106,7 @@ public class OpenAiTtsProviderTests
 
     /// <summary>
     /// Confirms an unrecognized target language (should never happen once
-    /// CascadeAudioSession's registry validation is in place, but the provider guards
+    /// CascadeSession's registry validation is in place, but the provider guards
     /// against it independently) falls back to a default voice instead of throwing.
     /// </summary>
     [Fact]

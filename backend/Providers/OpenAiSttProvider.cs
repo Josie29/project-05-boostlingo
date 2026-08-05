@@ -95,7 +95,7 @@ public sealed class OpenAiSttProvider(
             throw new SttProviderUnavailableException("Failed to connect to the speech-to-text provider.", ex);
         }
 
-        return new OpenAiSttStream(socket);
+        return new OpenAiSttStream(socket, logger);
     }
 
     private static OpenAiTranscriptionSessionUpdate BuildSessionUpdate(SttStreamConfig config) => new(
@@ -109,9 +109,12 @@ public sealed class OpenAiSttProvider(
     /// <summary>
     /// One open OpenAI transcription WebSocket, wrapped as an <see cref="ISttStream"/>.
     /// </summary>
-    private sealed class OpenAiSttStream(IRealtimeSocket socket) : ISttStream
+    private sealed class OpenAiSttStream(IRealtimeSocket socket, ILogger logger) : ISttStream
     {
-        private readonly DateTime _startedAtUtc = DateTime.UtcNow;
+        // Environment.TickCount64, not DateTime.UtcNow: TimestampMs feeds latency
+        // instrumentation (#10), and wall-clock deltas can jump under NTP (Network
+        // Time Protocol) adjustment, producing negative or inflated stage latencies.
+        private readonly long _startTick = Environment.TickCount64;
 
         /// <inheritdoc />
         /// <exception cref="SttProviderStreamException">Thrown when the underlying
@@ -125,7 +128,7 @@ public sealed class OpenAiSttProvider(
             }
             catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException)
             {
-                throw new SttProviderStreamException("Speech-to-text connection dropped while sending audio.");
+                throw new SttProviderStreamException("Speech-to-text connection dropped while sending audio.", ex);
             }
         }
 
@@ -142,7 +145,7 @@ public sealed class OpenAiSttProvider(
                 }
                 catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException)
                 {
-                    throw new SttProviderStreamException("Speech-to-text connection dropped.");
+                    throw new SttProviderStreamException("Speech-to-text connection dropped.", ex);
                 }
 
                 if (json is null)
@@ -151,7 +154,7 @@ public sealed class OpenAiSttProvider(
                     yield break;
                 }
 
-                var segment = ParseEvent(json, (long)(DateTime.UtcNow - _startedAtUtc).TotalMilliseconds);
+                var segment = ParseEvent(json, Environment.TickCount64 - _startTick);
                 if (segment is not null)
                 {
                     yield return segment;
@@ -175,30 +178,54 @@ public sealed class OpenAiSttProvider(
         /// </summary>
         /// <param name="json">One complete JSON text frame received from OpenAI.</param>
         /// <param name="timestampMs">Milliseconds since this stream was opened.</param>
-        /// <returns>The parsed segment, or <c>null</c> if this event doesn't map to one.</returns>
+        /// <returns>The parsed segment, or <c>null</c> if this event doesn't map to one
+        /// (including malformed frames and transcript events missing their
+        /// <c>item_id</c>, both of which are logged and skipped rather than allowed to
+        /// fault the whole segment pump).</returns>
         /// <exception cref="SttProviderStreamException">Thrown when OpenAI sends an
         /// <c>error</c> event.</exception>
-        private static SttSegment? ParseEvent(string json, long timestampMs)
+        private SttSegment? ParseEvent(string json, long timestampMs)
         {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
+            JsonDocument document;
+            try
+            {
+                document = JsonDocument.Parse(json);
+            }
+            catch (JsonException ex)
+            {
+                logger.LogWarning(ex, "Skipping a malformed frame from the OpenAI transcription stream.");
+                return null;
+            }
+
+            using (document)
+            {
+                return ParseEventElement(document.RootElement, timestampMs);
+            }
+        }
+
+        private SttSegment? ParseEventElement(JsonElement root, long timestampMs)
+        {
             var type = root.TryGetProperty("type", out var typeProperty) ? typeProperty.GetString() : null;
 
             switch (type)
             {
                 case "conversation.item.input_audio_transcription.delta":
-                    return new SttSegment(
-                        UtteranceId: GetString(root, "item_id") ?? "unknown",
-                        Text: GetString(root, "delta") ?? string.Empty,
-                        IsFinal: false,
-                        TimestampMs: timestampMs);
+                    return GetItemIdOrSkip(root, type) is { } deltaItemId
+                        ? new SttSegment(
+                            UtteranceId: deltaItemId,
+                            Text: GetString(root, "delta") ?? string.Empty,
+                            IsFinal: false,
+                            TimestampMs: timestampMs)
+                        : null;
 
                 case "conversation.item.input_audio_transcription.completed":
-                    return new SttSegment(
-                        UtteranceId: GetString(root, "item_id") ?? "unknown",
-                        Text: GetString(root, "transcript") ?? string.Empty,
-                        IsFinal: true,
-                        TimestampMs: timestampMs);
+                    return GetItemIdOrSkip(root, type) is { } completedItemId
+                        ? new SttSegment(
+                            UtteranceId: completedItemId,
+                            Text: GetString(root, "transcript") ?? string.Empty,
+                            IsFinal: true,
+                            TimestampMs: timestampMs)
+                        : null;
 
                 case "input_audio_buffer.committed":
                     // The VAD (Voice Activity Detection; semantic_vad - see
@@ -211,7 +238,9 @@ public sealed class OpenAiSttProvider(
                     // stage's mark for this utterance uses. Not yet spot-checked against
                     // a live OPENAI_API_KEY - see this field's caveat in
                     // docs/tech-stack.md alongside the semantic_vad decision itself.
-                    return SttSegment.SpeechEnd(GetString(root, "item_id") ?? "unknown", timestampMs);
+                    return GetItemIdOrSkip(root, type) is { } committedItemId
+                        ? SttSegment.SpeechEnd(committedItemId, timestampMs)
+                        : null;
 
                 case "input_audio_buffer.speech_started":
                     // The VAD detected the speaker beginning a new utterance - no
@@ -236,6 +265,24 @@ public sealed class OpenAiSttProvider(
                 default:
                     return null;
             }
+        }
+
+        /// <summary>
+        /// Reads the event's <c>item_id</c>, logging and returning <c>null</c> (skip
+        /// the frame) when it's missing - a shared fallback id would make unrelated
+        /// malformed events share one utterance, cross-contaminating the
+        /// replace-not-append transcript handling and latency marks that key by it.
+        /// </summary>
+        private string? GetItemIdOrSkip(JsonElement root, string? eventType)
+        {
+            var itemId = GetString(root, "item_id");
+            if (itemId is null)
+            {
+                logger.LogWarning(
+                    "Skipping a {EventType} frame with no item_id from the OpenAI transcription stream.", eventType);
+            }
+
+            return itemId;
         }
 
         private static string? GetString(JsonElement element, string propertyName) =>
@@ -367,20 +414,30 @@ internal sealed class ClientWebSocketRealtimeSocket : IRealtimeSocket
     public async Task<string?> ReceiveTextAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[ReceiveBufferBytes];
-        using var messageStream = new MemoryStream();
-        WebSocketReceiveResult result;
-        do
+        while (true)
         {
-            result = await _socket.ReceiveAsync(buffer, cancellationToken);
-            if (result.MessageType == WebSocketMessageType.Close)
+            using var messageStream = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
             {
-                return null;
+                result = await _socket.ReceiveAsync(buffer, cancellationToken);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    return null;
+                }
+
+                messageStream.Write(buffer, 0, result.Count);
+            } while (!result.EndOfMessage);
+
+            if (result.MessageType == WebSocketMessageType.Text)
+            {
+                return Encoding.UTF8.GetString(messageStream.ToArray());
             }
 
-            messageStream.Write(buffer, 0, result.Count);
-        } while (!result.EndOfMessage);
-
-        return Encoding.UTF8.GetString(messageStream.ToArray());
+            // A binary frame on this JSON-text-only stream would UTF-8-decode to
+            // garbage and be mistaken for a malformed event - skip it and keep
+            // waiting for the next text frame.
+        }
     }
 
     public ValueTask DisposeAsync()

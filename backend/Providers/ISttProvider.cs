@@ -165,5 +165,18 @@ public sealed class SttProviderUnavailableException : Exception
 /// or the <see cref="ISttStream.ReadSegmentsAsync"/> enumerator - when the provider reports an
 /// error or the underlying connection drops mid-session.
 /// </summary>
-/// <param name="message">A human-readable, non-sensitive description of what went wrong.</param>
-public sealed class SttProviderStreamException(string message) : Exception(message);
+public sealed class SttProviderStreamException : Exception
+{
+    /// <summary>Creates the exception with a user-safe message.</summary>
+    /// <param name="message">A human-readable, non-sensitive description of what went wrong.</param>
+    public SttProviderStreamException(string message) : base(message)
+    {
+    }
+
+    /// <summary>Creates the exception with a user-safe message and the underlying cause.</summary>
+    /// <param name="message">A human-readable, non-sensitive description of what went wrong.</param>
+    /// <param name="innerException">The lower-level exception that triggered this one.</param>
+    public SttProviderStreamException(string message, Exception innerException) : base(message, innerException)
+    {
+    }
+}
