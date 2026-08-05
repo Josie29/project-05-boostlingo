@@ -126,6 +126,19 @@ Serves on `http://localhost:5170`. Confirm it's up:
 curl http://localhost:5170/healthz
 ```
 
+Ctrl+C stops it normally. If it's stuck and won't free the port:
+
+```bash
+kill -9 $(lsof -tiTCP:5170 -sTCP:LISTEN)
+```
+
+Run it in `tmux` to reattach and watch logs from any terminal later:
+
+```bash
+tmux new -s backend      # inside: cd backend && dotnet run, then press Ctrl+B, release, then D to detach
+tmux attach -t backend   # reconnect anytime
+```
+
 ### Frontend
 
 In a second terminal:
