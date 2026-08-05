@@ -1,89 +1,87 @@
-# CLAUDE.md — how this project was built with a coding agent
+# CLAUDE.md
 
-This file is the agent-usage log the brief requires. It describes how Claude Code
-(Anthropic's CLI agent) was directed on this project: the workflow, the standing
-instructions, where the agent's output was accepted, and where it was overridden.
-It doubles as project context for future agent sessions.
+Real-time speech interpreter with two modes: **Realtime** (browser ↔ OpenAI
+directly over WebRTC; the backend only mints ephemeral client secrets) and
+**Cascade** (mic PCM over WebSocket to the backend, then STT → MT → TTS through
+provider interfaces). ASP.NET Core (.NET 10) backend, React 19 + Vite frontend.
 
-## Workflow: docs → issues → commits
+The brief-required narrative of *how* the agent was directed on this project
+lives in `docs/claude-usage.md` — that file is for human reviewers; this one
+is operational context for agent sessions.
 
-1. **Context documents first.** The partner brief was converted verbatim to
-   `docs/BRIEF.md`, and stack choices were argued in `docs/tech-stack.md`
-   (chosen vs. rejected alternatives) before any code existed.
-2. **Planning pass.** A one-off planning agent read those documents and produced
-   the GitHub issue set (#1–#18): scaffolding, Realtime mode, the cascade stages
-   (transport → STT → MT → TTS), language pairs, mode toggle, latency
-   instrumentation, barge-in, error hardening, tests, benchmarks, write-up, docs,
-   and two cut-line stretch issues. Each issue carries scope and acceptance
-   criteria the implementation was checked against.
-3. **Issue-driven implementation.** Work proceeded one issue at a time, usually
-   backend half then frontend half, each landing as its own scoped commit
-   referencing the issue (see `git log --reverse`). No "initial commit" dumps.
-4. **Review pass.** After #12, a dedicated multi-agent review was run: four
-   read-only reviewer agents (backend core, backend providers, frontend
-   transport, frontend UI/state) audited the codebase against the brief's code
-   quality bar; ~35 findings were triaged, and the accepted ones were applied as
-   a series of scoped fix commits (bugs, dedup, dead-code removal, file splits).
+## Commands
 
-## Standing instructions the agent worked under
+- Backend: `dotnet test` and `dotnet run` from `backend/` (listens on
+  `localhost:5170`; `dotnet watch` for hot reload).
+- Frontend: `npx vitest run`, `npx tsc -b`, and `npm run dev` from `frontend/`
+  (Vite proxies `/api`, `/healthz`, and `/ws` to 5170).
+- **Both suites must be green before any commit.** Both run offline — no API
+  keys needed. Vitest does not typecheck; run `tsc -b` too when TS changed.
+- Live sessions need `OPENAI_API_KEY` in the repo-root `.env` (DotNetEnv loads
+  it; shell env vars win) or `dotnet user-secrets`. Optional:
+  `TRANSLATION_PROVIDER=openai|anthropic` (+ `ANTHROPIC_API_KEY`),
+  `METRICS_DB_PATH` (defaults to `backend/data/metrics.db`, gitignored).
 
-- **Doc comments carry invariants and rationale**, not restatements — threading
-  assumptions, id-space distinctions, backpressure choices, issue references
-  (#N). This is enforced by convention across every file.
-- **Every non-trivial test names the user-facing behavior that breaks if it's
-  removed** ("catches stale TTS audio talking over the caller after a
-  barge-in"), tests live in dedicated directories, and behavior — not
-  implementation — is asserted.
-- **Provider abstractions are the load-bearing wall**: everything vendor-specific
-  lives in one provider file; the pipeline talks only to interfaces. The review
-  pass and the #17 swap demo both audited this boundary explicitly.
-- **Enums over bool flags / string literals** for fixed option sets
-  (`SttSegmentKind` replaced three mutually-exclusive bools during review).
-- Commit messages describe all staged changes; squash-merge PRs; no AI
-  attribution in commits or PRs.
+## Where things live
 
-## Sub-agents: tried, then deliberately removed
+- `backend/Program.cs` — all DI wiring; provider selection fails startup on an
+  unrecognized `TRANSLATION_PROVIDER` rather than falling back.
+- `backend/CascadeProtocol.cs` — the cascade wire protocol: envelope, message
+  types, latency marks, error taxonomy. Read this first for anything cascade.
+- `backend/CascadeSession.cs` — WebSocket transport (`/ws/cascade`);
+  `backend/CascadePipeline.cs` — STT/MT orchestration and barge-in;
+  `backend/TtsCascadeObserver.cs` — translation-to-TTS glue.
+- `backend/Providers/` — **the load-bearing boundary**: everything
+  vendor-specific stays in one provider file; the pipeline talks only to
+  `ISttProvider`/`ITranslationProvider`/`ITtsProvider`.
+- `backend/Languages.cs` — the single language registry; adding a language is
+  exactly one entry, nothing else changes.
+- `backend/Persistence/` + `backend/MetricsEndpoints.cs` — SQLite session
+  metrics behind `ISessionMetricsStore`; the frontend posts each conversation
+  at Stop, `GET /api/metrics/summary` serves the benchmark numbers.
+- `frontend/src/session/InterpreterSession.ts` — the mode-agnostic seam both
+  transports implement; `frontend/src/api.ts` — the sole fetch seam.
+  `latency/` and `transcript/` are transport-agnostic domains fed by per-mode
+  adapters; shared UI never imports a concrete transport.
 
-Mid-project, three project-scoped sub-agents were added (`backend-implementor`,
-`frontend-implementor`, `po-verifier`) and used to implement several issues and
-verify acceptance criteria. They were **removed** near the end
-(`9d32a3b Remove project subagent definitions`): the delegation round-trips made
-iteration slower, and the implementor output (running on a smaller model)
-needed enough correction that doing the work directly in the main session was
-faster and better. Read-only *review* fan-outs remained valuable — finding
-problems parallelizes well; fixing them didn't. That asymmetry is the main
-harness lesson of this project.
+## Invariants that bite
 
-## Accepted vs. overridden
+- **Id spaces:** every per-utterance event (marks, errors) keys on the
+  source-lane utterance id; MT/TTS transcript bookkeeping uses a derived
+  `"-target"` id; the frontend namespaces all ids per mode
+  (`cascade:`/`realtime:` — `prefixId` in `InterpreterSession.ts`).
+- **Clock discipline:** every latency span is a difference of two
+  `serverTimeMs` values or two client-side times — never client-minus-server.
+- **Audio format:** PCM16 mono 24 kHz both directions (OpenAI's transcription
+  intent rejects lower rates — verified against a live key, not docs).
+- `transcript.partial` carries **deltas**; `transcript.final` carries the
+  **full settled text** (appending it would double the text).
+- Telemetry never kills the pipeline: latency-mark and error-event send
+  failures are logged at Debug and swallowed (`CascadeLatencyMarks`,
+  `CascadeErrors`) — keep that property when adding instrumentation.
+- The backend has **no visibility into Realtime mode's traffic** — anything
+  needing both modes' timings must be captured client-side.
 
-**Accepted largely as produced:** the provider interface designs and their
-exception taxonomy, the WebSocket protocol envelope, the barge-in cancellation
-model, the latency-mark scheme, the review pass's bug findings (each verified
-against the code before fixing — e.g. a CancellationTokenSource dispose race in
-barge-in, a WebRTC `disconnected` state treated as fatal, latency turn-id
-collisions after reconnect).
+## Conventions
 
-**Directed or overridden by the human:**
+- Doc comments carry invariants and rationale (with issue refs #N), never
+  restatements of the code.
+- Enums over bool flags and string literals for fixed option sets.
+- Tests: `backend/tests/` and `frontend/src/__tests__/`; every non-trivial
+  test's comment names the user-facing behavior that breaks if it's removed;
+  assert behavior, not implementation.
+- Scoped commits describing all staged changes; no AI attribution anywhere;
+  squash-merge PRs.
+- Implement directly in the main session — project implementor sub-agents were
+  tried and removed as net-negative (`docs/claude-usage.md`); read-only review
+  fan-outs are still fine.
+- `docs/tech-stack.md` records resolved decisions — when a change revises one
+  (as persistence did to "metrics live purely client-side"), amend the entry
+  with the new rationale instead of silently contradicting it.
 
-- Removing the implementor sub-agents (above) — a direct correction of the
-  agent's own workflow proposal.
-- The decision to run the full architect-level review, and the instruction to
-  apply fixes rather than just report.
-- Scope calls on review findings (which cleanups were worth churn vs. noted as
-  follow-ups) were proposed by the agent, and follow-ups were then explicitly
-  green-lit ("apply those fixes") rather than assumed.
-- Model choice for the Anthropic MT provider (#17): the agent flagged the
-  latency-vs-quality tradeoff and defaulted to `claude-haiku-4-5` for parity
-  with `gpt-4o-mini`, with an env override rather than a hardcoded choice.
+## Docs
 
-## What a future agent session should know
-
-- Global user rules (communication, code quality, testing, git workflow,
-  frontend conventions) come from the user's `~/.claude` configuration and
-  apply here; this file adds the project-specific layer.
-- `dotnet test` from `backend/` and `npx vitest run` from `frontend/` must both
-  be green before any commit; both suites run offline (no API keys needed).
-- The cascade wire protocol is documented in `backend/CascadeProtocol.cs`;
-  transport lives in `backend/CascadeSession.cs`; orchestration in
-  `backend/CascadePipeline.cs`. The frontend's mode-agnostic seam is
-  `frontend/src/session/InterpreterSession.ts`.
+`docs/BRIEF.md` (requirements) · `docs/tech-stack.md` (decisions + resolved
+sub-decisions) · `docs/benchmarks.md` (method; results pending a live run) ·
+`docs/comparison.md` (mode comparison write-up) · `docs/deployment-plan.md`
+(functionality → AWS mapping) · `docs/claude-usage.md` (agent-usage narrative).

@@ -14,7 +14,8 @@ in the UI.
 - [docs/BRIEF.md](docs/BRIEF.md) — the partner brief, verbatim
 - [docs/tech-stack.md](docs/tech-stack.md) — stack decisions, chosen vs. rejected
 - [docs/comparison.md](docs/comparison.md) — the Realtime vs. Cascade comparison write-up
-- [CLAUDE.md](CLAUDE.md) — how the coding agent was directed (required by the brief)
+- [docs/claude-usage.md](docs/claude-usage.md) — how the coding agent was directed (required by the brief)
+- [CLAUDE.md](CLAUDE.md) — operational context loaded by agent sessions
 
 ## Acronyms
 
