@@ -24,7 +24,10 @@ public sealed record TtsRequest(string UtteranceId, string Text, string TargetLa
 /// </summary>
 /// <param name="UtteranceId">Echoes <see cref="TtsRequest.UtteranceId"/> for the request
 /// this chunk was produced from.</param>
-/// <param name="Pcm">Raw audio samples, encoded per the producing provider's <see cref="ITtsProvider.OutputFormat"/>.</param>
+/// <param name="Pcm">Raw audio samples, encoded per the producing provider's
+/// <see cref="ITtsProvider.OutputFormat"/>. Must be whole samples (even byte count for
+/// 16-bit formats): chunks become WebSocket frames the client decodes independently,
+/// so a torn sample makes the next frame play as static.</param>
 public sealed record TtsAudioChunk(string UtteranceId, ReadOnlyMemory<byte> Pcm);
 
 /// <summary>

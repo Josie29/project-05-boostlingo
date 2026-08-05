@@ -1,6 +1,4 @@
 using System.Net;
-using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -131,7 +129,7 @@ public class OpenAiTtsProviderTests
     [Fact]
     public async Task SynthesizeAsync_ReadsChunkedAudio_StampedWithUtteranceId()
     {
-        var handler = new FakeChunkedAudioHttpMessageHandler([1, 2, 3, 4, 5]);
+        var handler = new FakeChunkedAudioHttpMessageHandler([1, 2, 3, 4, 5, 6]);
         var provider = CreateProvider(handler, apiKey: "sk-test");
 
         var received = new List<byte>();
@@ -141,7 +139,47 @@ public class OpenAiTtsProviderTests
             received.AddRange(chunk.Pcm.ToArray());
         }
 
-        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, received);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6 }, received);
+    }
+
+    /// <summary>
+    /// Catches the static-burst bug: a read that splits a 16-bit sample produced an
+    /// odd-length frame, and the client decoded the following chunk as loud static.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_ReadSplitMidSample_YieldsOnlyWholeSampleChunks()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler([[1, 2, 3], [4, 5, 6, 7, 8]]);
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        var received = new List<byte>();
+        await foreach (var chunk in provider.SynthesizeAsync(new TtsRequest("utt-1", "Hi", "es"), CancellationToken.None))
+        {
+            Assert.Equal(0, chunk.Pcm.Length % 2);
+            received.AddRange(chunk.Pcm.ToArray());
+        }
+
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, received);
+    }
+
+    /// <summary>
+    /// Catches an odd *total* byte count (a torn final sample from the provider
+    /// itself) being yielded as an odd chunk instead of dropped.
+    /// </summary>
+    [Fact]
+    public async Task SynthesizeAsync_OddTotalBytes_DropsDanglingFinalByte()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler([[1, 2], [3, 4, 5]]);
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        var received = new List<byte>();
+        await foreach (var chunk in provider.SynthesizeAsync(new TtsRequest("utt-1", "Hi", "es"), CancellationToken.None))
+        {
+            Assert.Equal(0, chunk.Pcm.Length % 2);
+            received.AddRange(chunk.Pcm.ToArray());
+        }
+
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, received);
     }
 
     /// <summary>
@@ -177,7 +215,7 @@ public class OpenAiTtsProviderTests
     public async Task SynthesizeAsync_TransientServerError_RetriesOnceThenSucceeds()
     {
         var handler = new FakeChunkedAudioHttpMessageHandler(
-            (HttpStatusCode.InternalServerError, Array.Empty<byte>()), (HttpStatusCode.OK, new byte[] { 1, 2, 3 }));
+            (HttpStatusCode.InternalServerError, Array.Empty<byte>()), (HttpStatusCode.OK, new byte[] { 1, 2, 3, 4 }));
         var provider = CreateProvider(handler, apiKey: "sk-test");
 
         var received = new List<byte>();
@@ -186,7 +224,7 @@ public class OpenAiTtsProviderTests
             received.AddRange(chunk.Pcm.ToArray());
         }
 
-        Assert.Equal(new byte[] { 1, 2, 3 }, received);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, received);
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -290,6 +328,12 @@ file sealed class FakeChunkedAudioHttpMessageHandler : HttpMessageHandler
     {
     }
 
+    /// <summary>Scripts the exact bytes each stream read returns — a plain MemoryStream
+    /// body can't force a read boundary mid-sample.</summary>
+    public FakeChunkedAudioHttpMessageHandler(byte[][] readChunks)
+        : this([(HttpStatusCode.OK, readChunks.SelectMany(chunk => chunk).ToArray())]) =>
+        _scriptedReadChunks = readChunks;
+
     /// <summary>
     /// Scripts one response per call, in order (#12, error handling hardening's retry
     /// tests) - e.g. a transient failure followed by a success, to prove a retry
@@ -297,6 +341,8 @@ file sealed class FakeChunkedAudioHttpMessageHandler : HttpMessageHandler
     /// calls arrive than responses were scripted, the last response repeats.
     /// </summary>
     public FakeChunkedAudioHttpMessageHandler(params (HttpStatusCode StatusCode, byte[] Body)[] responses) => _responses = [.. responses];
+
+    private readonly byte[][]? _scriptedReadChunks;
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -310,7 +356,35 @@ file sealed class FakeChunkedAudioHttpMessageHandler : HttpMessageHandler
 
         return new HttpResponseMessage(statusCode)
         {
-            Content = new StreamContent(new MemoryStream(responseBytes)),
+            Content = new StreamContent(
+                _scriptedReadChunks is null ? new MemoryStream(responseBytes) : new ScriptedReadStream(_scriptedReadChunks)),
         };
     }
+}
+
+/// <summary>Returns exactly one scripted chunk per read.</summary>
+file sealed class ScriptedReadStream(byte[][] chunks) : Stream
+{
+    private int _nextChunk;
+
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (_nextChunk >= chunks.Length) return ValueTask.FromResult(0);
+        var chunk = chunks[_nextChunk++];
+        chunk.CopyTo(buffer.Span);
+        return ValueTask.FromResult(chunk.Length);
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+        ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }

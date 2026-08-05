@@ -84,13 +84,18 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
         {
             var body = await response.Content.ReadAsStreamAsync(cancellationToken);
             var buffer = new byte[ReadBufferBytes];
+            // True when buffer[0] holds the first byte of a sample torn by the previous
+            // read - carried so every yielded chunk is whole int16 samples (see
+            // TtsAudioChunk.Pcm; an odd chunk plays as static client-side).
+            var hasCarry = false;
 
             while (true)
             {
+                var offset = hasCarry ? 1 : 0;
                 int bytesRead;
                 try
                 {
-                    bytesRead = await body.ReadAsync(buffer, cancellationToken);
+                    bytesRead = await body.ReadAsync(buffer.AsMemory(offset), cancellationToken);
                 }
                 catch (Exception ex) when (ex is IOException
                     || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
@@ -106,12 +111,35 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
                 {
                     // The provider closed the response body normally - that is the end
                     // of this phrase's audio.
+                    if (hasCarry)
+                    {
+                        logger.LogDebug(
+                            "Text-to-speech stream for utterance {UtteranceId} ended mid-sample; dropping the dangling byte.",
+                            request.UtteranceId);
+                    }
+
                     yield break;
+                }
+
+                var total = offset + bytesRead;
+                hasCarry = total % 2 == 1;
+                if (hasCarry)
+                {
+                    total -= 1;
                 }
 
                 // Sliced into a new array (rather than yielding a view over the shared
                 // buffer) since the buffer is reused and overwritten on the next read.
-                yield return new TtsAudioChunk(request.UtteranceId, buffer[..bytesRead]);
+                var chunk = buffer[..total];
+                if (hasCarry)
+                {
+                    buffer[0] = buffer[total];
+                }
+
+                if (total > 0)
+                {
+                    yield return new TtsAudioChunk(request.UtteranceId, chunk);
+                }
             }
         }
     }
