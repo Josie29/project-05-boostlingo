@@ -46,14 +46,22 @@ export function selectRecentReports(state: LatencyState, limit: number = MAX_REC
  * arrived — the alternative (incrementally folding each update into a
  * running total) would count the same utterance's earlier, partial numbers
  * again every time a new mark for it lands.
+ *
+ * `filter` narrows which reports contribute (the per-mode scoreboard passes
+ * a mode predicate over the namespaced utteranceId); omitted, every report
+ * counts, exactly as before.
  */
-export function selectLatencyAverages(state: LatencyState): LatencySessionAverages {
-  if (state.reports.length === 0) return EMPTY_LATENCY_AVERAGES;
+export function selectLatencyAverages(
+  state: LatencyState,
+  filter?: (report: LatencyReport) => boolean,
+): LatencySessionAverages {
+  const reports = filter ? state.reports.filter(filter) : state.reports;
+  if (reports.length === 0) return EMPTY_LATENCY_AVERAGES;
 
   const stageSums = new Map<string, { total: number; count: number }>();
   const endToEndValues: number[] = [];
 
-  for (const report of state.reports) {
+  for (const report of reports) {
     if (report.endToEndMs !== null) endToEndValues.push(report.endToEndMs);
     for (const { stage, ms } of report.stages) {
       const sum = stageSums.get(stage) ?? { total: 0, count: 0 };
@@ -69,7 +77,7 @@ export function selectLatencyAverages(state: LatencyState): LatencySessionAverag
   }));
 
   return {
-    sampleCount: state.reports.length,
+    sampleCount: reports.length,
     stageAverages,
     endToEndAverageMs:
       endToEndValues.length > 0 ? endToEndValues.reduce((sum, value) => sum + value, 0) / endToEndValues.length : null,

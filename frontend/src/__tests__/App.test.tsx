@@ -26,7 +26,7 @@ function stubHook(overrides: Partial<UseInterpreterSessionResult> = {}): void {
     switching: false,
     transcriptEntries: [],
     latencyReports: [],
-    latencyAverages: EMPTY_LATENCY_AVERAGES,
+    latencyAveragesByMode: { realtime: EMPTY_LATENCY_AVERAGES, cascade: EMPTY_LATENCY_AVERAGES },
     notice: null,
     setMode: vi.fn(),
     start: vi.fn(),

@@ -41,7 +41,7 @@ function App() {
           switching={session.switching}
           transcriptEntries={session.transcriptEntries}
           latencyReports={session.latencyReports}
-          latencyAverages={session.latencyAverages}
+          latencyAveragesByMode={session.latencyAveragesByMode}
           notice={session.notice}
           onModeChange={session.setMode}
           onStart={session.start}

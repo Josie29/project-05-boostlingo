@@ -141,4 +141,49 @@ describe('TranscriptPanel', () => {
       expect(scrollEl.scrollTop).toBe(600);
     });
   });
+
+  describe('mode attribution', () => {
+    const mixedEntries: TranscriptEntry[] = [
+      { id: 'realtime:a', lane: 'source', text: 'Said over realtime', final: true },
+      { id: 'cascade:b', lane: 'source', text: 'Said over cascade', final: true },
+    ];
+
+    // Catches a listener being unable to tell which transport captured an
+    // utterance after a mid-session switch — the whole point of attribution.
+    it('marks each entry with its mode chip', () => {
+      render(<TranscriptPanel entries={mixedEntries} />);
+
+      expect(screen.getByLabelText('realtime')).toHaveTextContent('RT');
+      expect(screen.getByLabelText('cascade')).toHaveTextContent('CAS');
+    });
+
+    // Catches the filter narrowing nothing (or the wrong mode): picking Cascade
+    // must hide realtime-captured entries, and All must bring them back.
+    it('filters both columns to the selected mode and back', () => {
+      render(<TranscriptPanel entries={mixedEntries} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cascade' }));
+      expect(screen.queryByText('Said over realtime')).not.toBeInTheDocument();
+      expect(screen.getByText('Said over cascade')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'All' }));
+      expect(screen.getByText('Said over realtime')).toBeInTheDocument();
+    });
+
+    // Catches the switch moment going unmarked: consecutive entries from
+    // different modes get a divider naming the mode switched to; same-mode
+    // neighbors don't.
+    it('renders a mode-switch divider only where the mode actually changed', () => {
+      render(
+        <TranscriptPanel
+          entries={[
+            ...mixedEntries,
+            { id: 'cascade:c', lane: 'source', text: 'Still cascade', final: true },
+          ]}
+        />,
+      );
+
+      expect(screen.getAllByText('switched to cascade')).toHaveLength(1);
+    });
+  });
 });

@@ -21,11 +21,9 @@ const MODE_LABEL: Record<SessionMode, string> = {
 const MODES: SessionMode[] = ['realtime', 'cascade'];
 
 /**
- * Perceived-latency targets from the brief, keyed by mode. `LatencyPanel`
- * itself is mode-agnostic (it just renders whatever `benchmarkMs` it's
- * given) — this mode->benchmark mapping lives here instead, since
- * `SessionPanel` is the one component in the tree already sanctioned to
- * know `SessionMode` has two values (see `MODE_LABEL` above).
+ * Perceived-latency targets from the brief, keyed by mode. The mapping lives
+ * here (not in `LatencyPanel`) because this component already owns the
+ * mode->label mapping above; the panel renders whatever columns it's given.
  */
 const BENCHMARK_HINT_MS: Record<SessionMode, number> = {
   realtime: 1_500,
@@ -61,8 +59,8 @@ export interface SessionPanelProps {
   transcriptEntries: TranscriptEntry[];
   /** The most recently appeared utterances' latency breakdowns (issue #10), preserved across mode switches like `transcriptEntries`. */
   latencyReports: LatencyReport[];
-  /** Session-wide running latency averages (issue #10). */
-  latencyAverages: LatencySessionAverages;
+  /** Per-mode running latency averages — the scoreboard shows both modes against their own targets. */
+  latencyAveragesByMode: Record<SessionMode, LatencySessionAverages>;
   /** The latest non-fatal, dismissible per-stage notice (issue #12), rendered as a strip separate from the fatal `errorMessage` — the session stays connected and transcript keeps flowing underneath it. */
   notice: SessionNotice | null;
   /** Called when the listener picks a mode from the toggle — pre-session this just selects it; mid-session it triggers a switch. */
@@ -96,7 +94,7 @@ export function SessionPanel({
   switching,
   transcriptEntries,
   latencyReports,
-  latencyAverages,
+  latencyAveragesByMode,
   notice,
   onModeChange,
   onStart,
@@ -168,7 +166,15 @@ export function SessionPanel({
 
       <div className="session-panel__panels">
         <TranscriptPanel entries={transcriptEntries} />
-        <LatencyPanel benchmarkMs={BENCHMARK_HINT_MS[mode]} recentReports={latencyReports} averages={latencyAverages} />
+        <LatencyPanel
+          modes={MODES.map((candidate) => ({
+            mode: candidate,
+            label: MODE_LABEL[candidate],
+            targetMs: BENCHMARK_HINT_MS[candidate],
+            averages: latencyAveragesByMode[candidate],
+          }))}
+          recentReports={latencyReports}
+        />
       </div>
     </section>
   );

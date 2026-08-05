@@ -7,6 +7,9 @@
   --color-accent: #60a5fa;
   --color-success: #4ade80;
   --color-danger: #f87171;
+  /* Mode identity hues (CVD-validated pair on this dark surface) — always paired with chip text, never color alone. */
+  --color-mode-realtime: #3987e5;
+  --color-mode-cascade: #d95926;
 
   --font-sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, Consolas, monospace;

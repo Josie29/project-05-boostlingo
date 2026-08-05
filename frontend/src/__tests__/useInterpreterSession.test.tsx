@@ -386,11 +386,11 @@ describe('useInterpreterSession', () => {
   });
 
   // Catches a derive-fresh-value-every-render bug: latencyReports/
-  // latencyAverages must keep the same array/object reference across a
+  // latencyAveragesByMode must keep the same array/object reference across a
   // re-render that doesn't add a new latency report, or every consumer
   // keyed on referential equality (e.g. a memoized child, a dependency
   // array) would re-render/re-run for no reason on every unrelated update.
-  it('keeps stable latencyReports/latencyAverages references across a re-render with no new report', () => {
+  it('keeps stable latencyReports/latencyAveragesByMode references across a re-render with no new report', () => {
     const callOrder: string[] = [];
     const realtimeSession = createInstantFakeSession('realtime', callOrder);
     const cascadeSession = createInstantFakeSession('cascade', callOrder);
@@ -401,12 +401,31 @@ describe('useInterpreterSession', () => {
     act(() => result.current.start());
     act(() => realtimeSession.emitLatency({ utteranceId: 'realtime:turn-1', stages: [], endToEndMs: 1_200 }));
     const firstReports = result.current.latencyReports;
-    const firstAverages = result.current.latencyAverages;
+    const firstAverages = result.current.latencyAveragesByMode;
 
     rerender();
 
     expect(result.current.latencyReports).toBe(firstReports);
-    expect(result.current.latencyAverages).toBe(firstAverages);
+    expect(result.current.latencyAveragesByMode).toBe(firstAverages);
+  });
+
+  // Catches both modes' numbers blending into one pool after a mid-session
+  // switch: each mode's average must be computed only from its own utterances.
+  it('splits latency averages per mode, each from only that mode\'s reports', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitLatency({ utteranceId: 'realtime:turn-1', stages: [], endToEndMs: 1_000 }));
+    act(() => result.current.setMode('cascade'));
+    act(() => cascadeSession.emitLatency({ utteranceId: 'cascade:item_1', stages: [], endToEndMs: 3_000 }));
+
+    expect(result.current.latencyAveragesByMode.realtime.endToEndAverageMs).toBe(1_000);
+    expect(result.current.latencyAveragesByMode.cascade.endToEndAverageMs).toBe(3_000);
   });
 
   // Catches a stale-notice bug: reconnecting from a mid-session death should clear

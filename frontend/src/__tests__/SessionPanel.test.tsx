@@ -14,7 +14,7 @@ function renderPanel(overrides: Partial<SessionPanelProps> = {}) {
     switching: false,
     transcriptEntries: [],
     latencyReports: [],
-    latencyAverages: EMPTY_LATENCY_AVERAGES,
+    latencyAveragesByMode: { realtime: EMPTY_LATENCY_AVERAGES, cascade: EMPTY_LATENCY_AVERAGES },
     notice: null,
     onModeChange: vi.fn(),
     onStart: vi.fn(),
@@ -97,32 +97,38 @@ describe('SessionPanel', () => {
     expect(sourceColumn).toContainElement(screen.getByText('Hello there'));
   });
 
-  // Catches the bug where the panel drops or duplicates whatever latency reports it
-  // was handed instead of forwarding them straight to the shared LatencyPanel (issue #10).
-  it('forwards latencyReports and latencyAverages to the shared latency panel', () => {
+  // Catches the bug where the panel drops or duplicates whatever latency data it
+  // was handed instead of forwarding it straight to the shared LatencyPanel (issue #10).
+  it('forwards latencyReports and per-mode averages to the shared latency panel', () => {
     renderPanel({
       status: 'connected',
       latencyReports: [{ utteranceId: 'cascade:item_1', stages: [{ stage: 'sttFinal', ms: 210 }], endToEndMs: 900 }],
-      latencyAverages: { sampleCount: 1, stageAverages: [{ stage: 'sttFinal', ms: 150 }], endToEndAverageMs: 800 },
+      latencyAveragesByMode: {
+        realtime: EMPTY_LATENCY_AVERAGES,
+        cascade: { sampleCount: 1, stageAverages: [{ stage: 'sttFinal', ms: 150 }], endToEndAverageMs: 800 },
+      },
     });
 
-    expect(screen.getByText('Avg end-to-end: 800ms')).toBeInTheDocument();
+    expect(screen.getByText('800ms')).toBeInTheDocument();
     expect(screen.getByText('sttFinal: 150ms')).toBeInTheDocument();
     expect(screen.getByText('900ms')).toBeInTheDocument();
     expect(screen.getByText('sttFinal: 210ms')).toBeInTheDocument();
   });
 
-  // Catches the benchmark-hint wiring bug: Realtime and Cascade have different
-  // targets per the brief (1.5s vs 3s), and `SessionPanel` (not the
-  // mode-agnostic `LatencyPanel`) is what picks which one applies — the panel
-  // must pick the hint matching the active mode, not always show one or the
-  // other.
-  it('passes the benchmark hint matching the active mode down to the latency panel', () => {
-    renderPanel({ mode: 'realtime' });
-    expect(screen.getByText('Target: under 1.5s')).toBeInTheDocument();
+  // Catches the target wiring bug: Realtime and Cascade have different targets
+  // per the brief (1.5s vs 3s), and both must be visible at once — each column
+  // judged against its own, regardless of which mode is active.
+  it('shows both modes\' targets in the scoreboard at once', () => {
+    renderPanel({
+      mode: 'realtime',
+      latencyAveragesByMode: {
+        realtime: { sampleCount: 1, stageAverages: [], endToEndAverageMs: 1_000 },
+        cascade: { sampleCount: 1, stageAverages: [], endToEndAverageMs: 2_000 },
+      },
+    });
 
-    renderPanel({ mode: 'cascade' });
-    expect(screen.getByText('Target: under 3.0s')).toBeInTheDocument();
+    expect(screen.getByText('✓ under 1.5s target')).toBeInTheDocument();
+    expect(screen.getByText('✓ under 3.0s target')).toBeInTheDocument();
   });
 
   // Catches the bug where a backend error surfaces silently (or not at all) instead

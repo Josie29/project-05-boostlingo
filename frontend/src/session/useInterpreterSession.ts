@@ -57,8 +57,8 @@ export interface UseInterpreterSessionResult {
   transcriptEntries: TranscriptEntry[];
   /** The most recently appeared utterances' latency breakdowns (issue #10), preserved across mode switches like `transcriptEntries`. */
   latencyReports: LatencyReport[];
-  /** Session-wide running latency averages, recomputed from every report accumulated so far (issue #10). */
-  latencyAverages: LatencySessionAverages;
+  /** Per-mode running latency averages — each mode's population judged against its own target by the scoreboard, never blended. */
+  latencyAveragesByMode: Record<SessionMode, LatencySessionAverages>;
   /** The latest non-fatal, dismissible per-stage notice (issue #12), or `null` once dismissed/superseded/cleared by a fresh `start()`/`reconnect()`/mode switch. */
   notice: SessionNotice | null;
   /**
@@ -253,7 +253,13 @@ export function useInterpreterSession(
   // which would otherwise defeat any downstream `React.memo`/dependency
   // array keyed on these values.
   const latencyReports = useMemo(() => selectRecentReports(latencyState), [latencyState]);
-  const latencyAverages = useMemo(() => selectLatencyAverages(latencyState), [latencyState]);
+  const latencyAveragesByMode = useMemo(
+    () => ({
+      realtime: selectLatencyAverages(latencyState, (report) => modeOfPrefixedId(report.utteranceId) === 'realtime'),
+      cascade: selectLatencyAverages(latencyState, (report) => modeOfPrefixedId(report.utteranceId) === 'cascade'),
+    }),
+    [latencyState],
+  );
 
   return {
     mode,
@@ -264,7 +270,7 @@ export function useInterpreterSession(
     switching,
     transcriptEntries: transcriptState.entries,
     latencyReports,
-    latencyAverages,
+    latencyAveragesByMode,
     notice,
     setMode,
     start: () => {

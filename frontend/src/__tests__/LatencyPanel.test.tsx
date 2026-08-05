@@ -4,11 +4,15 @@ import { LatencyPanel } from '../components/LatencyPanel';
 import type { LatencyPanelProps } from '../components/LatencyPanel';
 import { EMPTY_LATENCY_AVERAGES } from '../latency/types';
 
+const BOTH_MODES: LatencyPanelProps['modes'] = [
+  { mode: 'realtime', label: 'Realtime', targetMs: 1_500, averages: EMPTY_LATENCY_AVERAGES },
+  { mode: 'cascade', label: 'Cascade', targetMs: 3_000, averages: EMPTY_LATENCY_AVERAGES },
+];
+
 function renderPanel(overrides: Partial<LatencyPanelProps> = {}) {
   const props: LatencyPanelProps = {
-    benchmarkMs: 3_000,
+    modes: BOTH_MODES,
     recentReports: [],
-    averages: EMPTY_LATENCY_AVERAGES,
     ...overrides,
   };
   render(<LatencyPanel {...props} />);
@@ -16,18 +20,73 @@ function renderPanel(overrides: Partial<LatencyPanelProps> = {}) {
 }
 
 describe('LatencyPanel', () => {
-  // Catches the bug where a listener has no way to tell there's simply been no
-  // conversation yet, versus the panel being broken.
-  it('shows an empty state for both sections when no reports have arrived', () => {
+  // Catches a listener having no way to tell there's been no conversation yet
+  // versus the panel being broken — each mode column plus the recent list say so.
+  it('shows an empty state per mode column and for the recent list', () => {
     renderPanel();
 
-    expect(screen.getAllByText(/nothing yet|no utterances yet/i)).toHaveLength(2);
+    expect(screen.getAllByText('No utterances yet.')).toHaveLength(2);
+    expect(screen.getByText('Nothing yet.')).toBeInTheDocument();
   });
 
-  // Catches the core rendering bug this component exists to avoid: a per-utterance
-  // stage breakdown that doesn't actually show each stage's own row, leaving a
-  // listener with only the total and no insight into which stage was slow.
-  it('renders a stage row per stage in a recent report, plus its overall total', () => {
+  // Catches the regression this scoreboard exists to fix: both modes' averages
+  // blended into one number judged against a single target. Each column must
+  // show its own average against its own target.
+  it('renders each mode column with its own average and target verdict', () => {
+    renderPanel({
+      modes: [
+        {
+          mode: 'realtime',
+          label: 'Realtime',
+          targetMs: 1_500,
+          averages: { sampleCount: 2, stageAverages: [{ stage: 'audioStart', ms: 400 }], endToEndAverageMs: 1_113 },
+        },
+        {
+          mode: 'cascade',
+          label: 'Cascade',
+          targetMs: 3_000,
+          averages: { sampleCount: 3, stageAverages: [{ stage: 'sttFinal', ms: 276 }], endToEndAverageMs: 3_200 },
+        },
+      ],
+    });
+
+    expect(screen.getByText('1113ms')).toBeInTheDocument();
+    expect(screen.getByText('✓ under 1.5s target')).toBeInTheDocument();
+    expect(screen.getByText('audioStart: 400ms')).toBeInTheDocument();
+
+    expect(screen.getByText('3200ms')).toBeInTheDocument();
+    expect(screen.getByText('▲ 200ms over 3.0s target')).toBeInTheDocument();
+    expect(screen.getByText('sttFinal: 276ms')).toBeInTheDocument();
+  });
+
+  // Catches a recent utterance judged against the wrong mode's target after a
+  // mid-session switch: 2000ms is over Realtime's 1.5s but under Cascade's 3s,
+  // so the verdict must come from the utterance's own mode.
+  it('marks each recent utterance with its mode chip and judges it against that mode\'s target', () => {
+    renderPanel({
+      recentReports: [
+        { utteranceId: 'realtime:turn-1', stages: [], endToEndMs: 2_000 },
+        { utteranceId: 'cascade:item_1', stages: [], endToEndMs: 2_000 },
+      ],
+    });
+
+    expect(screen.getByLabelText('realtime')).toHaveTextContent('RT');
+    expect(screen.getByLabelText('cascade')).toHaveTextContent('CAS');
+    expect(screen.getByText('▲ 500ms over target')).toBeInTheDocument();
+    expect(screen.getByText('✓')).toBeInTheDocument();
+  });
+
+  // Catches an utterance still mid-flight rendering a confusing blank or stale
+  // number instead of clearly showing it's pending.
+  it("shows 'pending' for a report whose endToEndMs is not yet known", () => {
+    renderPanel({ recentReports: [{ utteranceId: 'cascade:item_1', stages: [], endToEndMs: null }] });
+
+    expect(screen.getByText('pending')).toBeInTheDocument();
+  });
+
+  // Catches a per-utterance stage breakdown that drops stage rows, leaving only
+  // the total with no insight into which stage was slow.
+  it('renders a stage row per stage in a recent report', () => {
     renderPanel({
       recentReports: [
         {
@@ -44,37 +103,5 @@ describe('LatencyPanel', () => {
     expect(screen.getByText('980ms')).toBeInTheDocument();
     expect(screen.getByText('sttFinal: 320ms')).toBeInTheDocument();
     expect(screen.getByText('mtFinal: 140ms')).toBeInTheDocument();
-  });
-
-  // Catches a bug where an utterance still mid-flight (no marks resolved enough for
-  // an endToEndMs yet) renders a confusing blank or a stale number instead of clearly
-  // showing it's still pending.
-  it("shows 'pending' for a report whose endToEndMs is not yet known", () => {
-    renderPanel({ recentReports: [{ utteranceId: 'cascade:item_1', stages: [], endToEndMs: null }] });
-
-    expect(screen.getByText('pending')).toBeInTheDocument();
-  });
-
-  // Catches the core averages-rendering bug: the session summary must show the
-  // running average, not just repeat the most recent utterance's own numbers.
-  it('renders the session averages section once samples exist', () => {
-    renderPanel({
-      averages: { sampleCount: 3, stageAverages: [{ stage: 'sttFinal', ms: 250 }], endToEndAverageMs: 1_000 },
-    });
-
-    expect(screen.getByText('Avg end-to-end: 1000ms')).toBeInTheDocument();
-    expect(screen.getByText('sttFinal: 250ms')).toBeInTheDocument();
-  });
-
-  // Catches a formatting bug: this panel renders whatever `benchmarkMs` it's
-  // given (mode->benchmark mapping is `SessionPanel`'s job, not this
-  // mode-agnostic panel's — see `SessionPanel.test.tsx` for that mapping)
-  // — the hint text must reflect that exact value, in seconds.
-  it('shows the given benchmark hint, in seconds', () => {
-    renderPanel({ benchmarkMs: 1_500 });
-    expect(screen.getByText('Target: under 1.5s')).toBeInTheDocument();
-
-    render(<LatencyPanel benchmarkMs={3_000} recentReports={[]} averages={EMPTY_LATENCY_AVERAGES} />);
-    expect(screen.getByText('Target: under 3.0s')).toBeInTheDocument();
   });
 });

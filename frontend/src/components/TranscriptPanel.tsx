@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useRef } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import { modeOfPrefixedId, type SessionMode } from '../session/InterpreterSession';
 import type { TranscriptEntry, TranscriptLane } from '../transcript/types';
 
 const LANE_LABEL: Record<TranscriptLane, string> = {
@@ -7,6 +8,18 @@ const LANE_LABEL: Record<TranscriptLane, string> = {
 };
 
 const LANES: TranscriptLane[] = ['source', 'target'];
+
+/** All | one mode — which entries both columns show. */
+type ModeFilter = 'all' | SessionMode;
+
+const FILTERS: { value: ModeFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'realtime', label: 'Realtime' },
+  { value: 'cascade', label: 'Cascade' },
+];
+
+/** Short chip text per mode; the full mode name rides along as the accessible label. */
+const MODE_CHIP: Record<SessionMode, string> = { realtime: 'RT', cascade: 'CAS' };
 
 /**
  * How close to the bottom (in pixels) a manual scroll must remain for the
@@ -23,21 +36,37 @@ export interface TranscriptPanelProps {
 }
 
 /**
- * Shared, mode-agnostic live transcript UI: a source column (what was said)
- * and a target column (its interpretation), each auto-scrolling as new text
- * arrives. Takes only the transport-agnostic {@link TranscriptEntry} domain
- * type — no Realtime- or cascade-specific detail — so either session mode
- * feeds it via its own adapter without this component changing.
+ * Live transcript UI: a source column (what was said) and a target column
+ * (its interpretation), each auto-scrolling as new text arrives. Each entry
+ * carries a mode rail + chip (chip text, never color alone), a filter row
+ * narrows both columns to one mode, and a labeled divider marks each
+ * mid-conversation mode switch.
  */
 export function TranscriptPanel({ entries }: TranscriptPanelProps) {
+  const [filter, setFilter] = useState<ModeFilter>('all');
+  const visible = filter === 'all' ? entries : entries.filter((entry) => modeOfPrefixedId(entry.id) === filter);
+
   return (
     <section className="transcript-panel" aria-label="Live transcript">
+      <div className="transcript-panel__filters" role="group" aria-label="Filter by mode">
+        {FILTERS.map(({ value, label }) => (
+          <button
+            key={value}
+            type="button"
+            className="transcript-panel__filter"
+            aria-pressed={filter === value}
+            onClick={() => setFilter(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="transcript-panel__columns">
         {LANES.map((lane) => (
           <TranscriptColumn
             key={lane}
             lane={lane}
-            entries={entries.filter((entry) => entry.lane === lane)}
+            entries={visible.filter((entry) => entry.lane === lane)}
           />
         ))}
       </div>
@@ -79,26 +108,38 @@ function TranscriptColumn({ lane, entries }: { lane: TranscriptLane; entries: Tr
         {entries.length === 0 ? (
           <p className="transcript-panel__empty">Nothing yet.</p>
         ) : (
-          entries.map((entry) => (
-            // The truncation marker renders as a sibling of the <p>, not a child of
-            // it, so the <p>'s own text content stays exactly `entry.text` — anything
-            // reading its rendered text (e.g. `getByText`) shouldn't have to account
-            // for trailing UI chrome that was never part of what was actually said.
-            <Fragment key={entry.id}>
-              <p
-                className="transcript-panel__entry"
-                data-final={entry.final}
-                data-truncated={entry.truncated ?? false}
-              >
-                {entry.text}
-              </p>
-              {entry.truncated && (
-                <span className="transcript-panel__truncated-marker" aria-label="cut off by barge-in">
-                  (cut off)
-                </span>
-              )}
-            </Fragment>
-          ))
+          entries.map((entry, index) => {
+            const mode = modeOfPrefixedId(entry.id);
+            const previousMode = index > 0 ? modeOfPrefixedId(entries[index - 1].id) : null;
+            return (
+              // The truncation marker renders as a sibling of the <p>, not a child of
+              // it, so the <p>'s own text content stays exactly `entry.text` — anything
+              // reading its rendered text (e.g. `getByText`) shouldn't have to account
+              // for trailing UI chrome that was never part of what was actually said.
+              <Fragment key={entry.id}>
+                {previousMode !== null && previousMode !== mode && (
+                  <p className="transcript-panel__mode-switch">switched to {mode}</p>
+                )}
+                <div className="transcript-panel__entry-row" data-mode={mode}>
+                  <span className="transcript-panel__chip" aria-label={mode}>
+                    {MODE_CHIP[mode]}
+                  </span>
+                  <p
+                    className="transcript-panel__entry"
+                    data-final={entry.final}
+                    data-truncated={entry.truncated ?? false}
+                  >
+                    {entry.text}
+                  </p>
+                  {entry.truncated && (
+                    <span className="transcript-panel__truncated-marker" aria-label="cut off by barge-in">
+                      (cut off)
+                    </span>
+                  )}
+                </div>
+              </Fragment>
+            );
+          })
         )}
       </div>
     </div>
