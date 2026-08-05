@@ -6,7 +6,7 @@
 | Backend | Client transport (cascade) | Raw WebSockets | Bi-directional binary audio streaming with no framework abstraction in the hot path |
 | Backend | Realtime-mode transport | Browser ↔ OpenAI via WebRTC, backend mints ephemeral tokens | Lowest latency path; OpenAI-recommended pattern; keeps API key server-side |
 | Backend | Provider abstraction | C# interfaces (`ISttProvider`, `ITranslationProvider`, `ITtsProvider`) | Brief requires swappable providers; interfaces are the idiomatic C# contract |
-| Cascade | STT (Speech to Text) | OpenAI `gpt-4o-transcribe` (streaming WS) | Streaming partials on the single OpenAI key; fastest start |
+| Cascade | STT (Speech to Text) | OpenAI `gpt-4o-mini-transcribe` (streaming WS) | Streaming partials on the single OpenAI key; fastest start |
 | Cascade | MT (Machine Translation) | OpenAI `gpt-4o-mini` (streaming chat) | Streams token-by-token so TTS can start early; cheap; same key |
 | Cascade | TTS (Text to Speech) | OpenAI `gpt-4o-mini-tts` (streaming) | Streamed audio chunks; same key; adequate voice quality for the demo |
 | Frontend | Language / framework | TypeScript + React 19 | Partner-preferred frontend language; React state fits live transcripts + mode toggle |
