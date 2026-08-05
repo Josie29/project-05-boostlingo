@@ -64,8 +64,7 @@ is operational context for agent sessions.
 
 ## Conventions
 
-- Doc comments carry invariants and rationale (with issue refs #N), never
-  restatements of the code.
+- Do not overcomment the code, only comment what is truly helpful for readability.
 - Enums over bool flags and string literals for fixed option sets.
 - Tests: `backend/tests/` and `frontend/src/__tests__/`; every non-trivial
   test's comment names the user-facing behavior that breaks if it's removed;
