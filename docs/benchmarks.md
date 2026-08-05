@@ -35,6 +35,12 @@ audio drift, or unbounded memory growth.
 
 ## Results — Realtime
 
+Measurement note: Realtime's end-to-end spans VAD speech-stopped →
+`output_audio_buffer.started` (server begins sending audio), client clock.
+Slightly understates perceived latency: audibility isn't observable per turn
+over WebRTC, so network + jitter-buffer playout (tens of ms) fall outside it.
+The breakdown splits into `responseCreated` and `audioStart`.
+
 | Metric | Target | Measured |
 | --- | --- | --- |
 | Perceived latency, median (speech end → first audio) | < 1.5 s | _pending_ |

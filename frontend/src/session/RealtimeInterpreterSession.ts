@@ -12,18 +12,10 @@ import { ListenerSet } from './listenerSet';
  * {@link InterpreterSession}, so the shared session UI can drive a Realtime
  * (WebRTC) session without importing anything WebRTC-specific.
  *
- * Also owns a `RealtimeLatencyTracker` (issue #10): it feeds every
- * data-channel event (via the controller's own unfiltered fan-out) into the
- * tracker looking for `input_audio_buffer.speech_stopped`, and listens for
- * the remote `<audio>` element's `playing` event to pair with it — see
- * `realtimeLatencyAdapter.ts` for why this is the coarsest of the two
- * transports' instrumentation (no backend visibility, no shared id linking
- * the two boundaries). The `playing` listener is attached once, for this
- * adapter's whole lifetime, onto the controller's single reused audio
- * element (`RealtimeSessionController.getAudioElement()` never changes
- * instances across `start()`/`stop()` cycles), mirroring how
- * `CascadeInterpreterSession` wires its playback queue once in its own
- * constructor.
+ * Also owns a `RealtimeLatencyTracker` (issue #10), fed from the controller's
+ * unfiltered data-channel fan-out — see `realtimeLatencyAdapter.ts` for which
+ * boundaries it pairs and why they must come from the data channel rather
+ * than the remote `<audio>` element.
  *
  * Owns exactly one controller for its whole lifetime; `useInterpreterSession`
  * constructs one instance per mode and keeps it alive across mode switches so
@@ -42,10 +34,9 @@ export class RealtimeInterpreterSession implements InterpreterSession {
   ) {
     this.controller = controller;
     this.latencyTracker = latencyTracker;
-    this.controller.subscribeToEvents((event) => this.latencyTracker.handleEvent(event, performance.now()));
-    this.controller.getAudioElement().addEventListener('playing', () => {
-      this.emitLatencyReport(this.latencyTracker.handleAudioPlaying(performance.now()));
-    });
+    this.controller.subscribeToEvents((event) =>
+      this.emitLatencyReport(this.latencyTracker.handleEvent(event, performance.now())),
+    );
   }
 
   /** Namespaces a report's utteranceId (see `prefixId`'s remarks) and fans it out, unless the tracker had no pending turn to report. */

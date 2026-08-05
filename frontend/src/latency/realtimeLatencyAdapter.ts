@@ -1,89 +1,86 @@
-import type { LatencyReport } from './types';
+import type { LatencyReport, LatencyStageTiming } from './types';
 
 /**
- * Realtime mode's latency instrumentation (issue #10) is necessarily
- * coarser than cascade's: the backend has no visibility into a direct
- * browser<->OpenAI WebRTC session (it only mints the ephemeral token), so
- * there are no per-pipeline-stage server marks to fold. Only two boundaries
- * are observable at all, both client-side:
+ * Realtime mode's latency instrumentation (issue #10). No backend visibility
+ * into a direct browser<->OpenAI WebRTC session, so everything observable
+ * arrives on the `oai-events` data channel. Three boundaries per turn:
+ * `input_audio_buffer.speech_stopped` (VAD says the speaker finished — the
+ * anchor), `response.created` (model began responding), and
+ * `output_audio_buffer.started` (server began sending the response's audio —
+ * completes the measurement).
  *
- * - `input_audio_buffer.speech_stopped` — a data-channel event OpenAI's own
- *   VAD (Voice Activity Detection) fires the instant it detects the speaker
- *   stopped talking. `RealtimeSessionController.subscribeToEvents` already
- *   forwards this unfiltered, same as every other data-channel event.
- *   (`input_audio_buffer.committed`, the event `OpenAiSttProvider` uses
- *   server-side for cascade's own `speechEnd` mark, carries an `item_id` an
- *   equivalent Realtime-side handler *could* key off of, but this tracker
- *   doesn't need one — see below.)
- * - the remote `<audio>` element (`RealtimeSessionController.getAudioElement()`)
- *   actually starting playback. `ontrack` assigns the remote stream to it
- *   once, during negotiation; from then on, the standard `playing` media
- *   event fires every time playback *resumes* after a pause or buffering
- *   stall — in practice, once per spoken turn, since silence between turns
- *   starves the element until the next response's audio arrives.
+ * `output_audio_buffer.started` replaces an earlier pairing against the remote
+ * `<audio>` element's `playing` event, which fires exactly once per WebRTC
+ * session (a live remote track streams continuously, silence included, so the
+ * element never re-buffers between turns) — leaving every turn unmeasured.
  *
- * Unlike cascade's shared source-lane `utteranceId`, there is no id linking
- * one turn's `speech_stopped` to the `playing` event it causes. This
- * tracker pairs them purely by recency — the latest `speech_stopped` and
- * the next `playing` after it — which produces one coarse, per-turn
- * measurement with no stage breakdown (`stages` is always empty; only
- * `endToEndMs` is populated). Utterances are given a synthetic, incrementing
- * id (`turn-1`, `turn-2`, ...) purely so the shared `LatencyReport`/reducer
- * shape still has something to key by.
- *
- * Both boundaries are read with the browser's own clock
- * (`performance.now()`, injected as `now` for tests) — never OpenAI's or
- * the backend's — so `endToEndMs` here is a single same-clock subtraction,
- * consistent with the clock-discipline the cascade adapter also follows.
+ * `endToEndMs` slightly understates perceived latency: it ends when the server
+ * starts sending audio, not when it's audible (network + jitter-buffer playout
+ * excluded) — actual audibility isn't observable per turn. Events carry no id
+ * linking one turn's boundaries, so they pair by recency, and turns get
+ * synthetic ids (`turn-1`, ...). All boundaries read the same injected local
+ * clock — every number is a same-clock subtraction, per the clock discipline
+ * the cascade adapter also follows.
  */
 export class RealtimeLatencyTracker {
   private pendingSpeechStoppedAtMs: number | null = null;
+  private responseCreatedAtMs: number | null = null;
   private turnCounter = 0;
 
   /**
-   * Clears any pending `speech_stopped` anchor, for a fresh session.
-   *
-   * Deliberately does *not* reset `turnCounter`: `useInterpreterSession`
-   * intentionally preserves latency history across reconnects and
-   * mode-switches, and `LatencyReport.utteranceId` values are threaded
-   * through a mode-prefixing step upstream that only de-dupes *within* a
-   * mode, not across a `reset()` call. If the counter restarted at 0 here,
-   * a post-reset `turn-1` would collide with the pre-reset `turn-1` still
-   * sitting in that preserved history, and the latency reducer would treat
-   * the new turn as an update to the old report instead of a new one.
+   * Clears pending turn state for a fresh session. Deliberately keeps
+   * `turnCounter`: latency history is preserved across reconnects/mode
+   * switches upstream, and a restarted counter would mint a `turn-1` that
+   * collides with the preserved pre-reset `turn-1` in the shared reducer.
    */
   reset(): void {
     this.pendingSpeechStoppedAtMs = null;
+    this.responseCreatedAtMs = null;
   }
 
   /**
-   * Feeds one raw, already-JSON-parsed Realtime data-channel event. Only
-   * `input_audio_buffer.speech_stopped` is observed; every other event type
-   * (transcripts, response lifecycle, etc.) is ignored here — other
-   * adapters handle those.
+   * Feeds one parsed data-channel event; returns a completed turn's report
+   * when the event closes out a pending turn, else `null`. `stages` is empty
+   * (never zero placeholders) if no `response.created` was observed.
    */
-  handleEvent(rawEvent: unknown, nowMs: number): void {
-    if (typeof rawEvent !== 'object' || rawEvent === null) return;
+  handleEvent(rawEvent: unknown, nowMs: number): LatencyReport | null {
+    if (typeof rawEvent !== 'object' || rawEvent === null) return null;
     const type = (rawEvent as { type?: unknown }).type;
+
     if (type === 'input_audio_buffer.speech_stopped') {
+      // Re-anchor even if the previous turn never completed (cancelled or
+      // silent response) — stale turns are abandoned, not reported.
       this.pendingSpeechStoppedAtMs = nowMs;
+      this.responseCreatedAtMs = null;
+      return null;
     }
-  }
 
-  /**
-   * Called when the remote `<audio>` element's `playing` event fires.
-   * Returns a coarse {@link LatencyReport} if there's a pending
-   * `speech_stopped` anchor to pair it with, or `null` otherwise (e.g. a
-   * `playing` event firing for reasons unrelated to a spoken turn, or one
-   * that already got consumed by an earlier `playing` event).
-   */
-  handleAudioPlaying(nowMs: number): LatencyReport | null {
-    if (this.pendingSpeechStoppedAtMs === null) return null;
+    if (type === 'response.created') {
+      if (this.pendingSpeechStoppedAtMs !== null && this.responseCreatedAtMs === null) {
+        this.responseCreatedAtMs = nowMs;
+      }
+      return null;
+    }
 
-    const endToEndMs = nowMs - this.pendingSpeechStoppedAtMs;
-    this.pendingSpeechStoppedAtMs = null;
-    this.turnCounter += 1;
+    if (type === 'output_audio_buffer.started') {
+      if (this.pendingSpeechStoppedAtMs === null) return null;
 
-    return { utteranceId: `turn-${this.turnCounter}`, stages: [], endToEndMs };
+      const stages: LatencyStageTiming[] =
+        this.responseCreatedAtMs !== null
+          ? [
+              { stage: 'responseCreated', ms: this.responseCreatedAtMs - this.pendingSpeechStoppedAtMs },
+              { stage: 'audioStart', ms: nowMs - this.responseCreatedAtMs },
+            ]
+          : [];
+      const endToEndMs = nowMs - this.pendingSpeechStoppedAtMs;
+
+      this.pendingSpeechStoppedAtMs = null;
+      this.responseCreatedAtMs = null;
+      this.turnCounter += 1;
+
+      return { utteranceId: `turn-${this.turnCounter}`, stages, endToEndMs };
+    }
+
+    return null;
   }
 }
