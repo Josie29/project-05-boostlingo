@@ -115,6 +115,73 @@ export async function createRealtimeSession(pair?: LanguagePair): Promise<Realti
 }
 
 /**
+ * One utterance's latency breakdown as posted to the backend — the wire form
+ * of `LatencyReport` plus the mode recovered from its id prefix (see
+ * `modeOfPrefixedId` in `session/InterpreterSession.ts`). The `mode` union is
+ * spelled out (rather than importing `SessionMode`) so this module keeps its
+ * one-way dependency direction: session code imports from `api.ts`, never the
+ * reverse.
+ */
+export interface UtteranceMetricsPayload {
+  utteranceId: string;
+  mode: 'realtime' | 'cascade';
+  /** Perceived end-to-end latency in ms, or `null` if this utterance never completed one. */
+  endToEndMs: number | null;
+  stages: { stage: string; ms: number }[];
+}
+
+/** One transcript entry as posted to the backend — the wire form of `TranscriptEntry`. */
+export interface TranscriptEntryPayload {
+  utteranceId: string;
+  lane: 'source' | 'target';
+  text: string;
+  final: boolean;
+  truncated?: boolean;
+}
+
+/**
+ * One conversation's full captured metrics, posted at session stop so
+ * benchmark numbers survive the page and become comparable across sessions
+ * (`POST /api/metrics/conversations`; issue #10 revisited — see
+ * docs/tech-stack.md's amended entry). The id is client-generated per Start
+ * press; the backend upserts on it, so re-posting is safe.
+ */
+export interface ConversationMetricsPayload {
+  conversationId: string;
+  sourceLang: string;
+  targetLang: string;
+  /** Client clock (`Date.now()`) at Start — labels/orders conversations only, never enters latency math. */
+  startedAtMs: number;
+  /** Client clock at Stop; same caveat as `startedAtMs`. */
+  endedAtMs: number;
+  utterances: UtteranceMetricsPayload[];
+  transcript: TranscriptEntryPayload[];
+}
+
+/**
+ * Posts one conversation's captured metrics for persistence.
+ *
+ * @param payload - The conversation's accumulated latency reports and transcript.
+ * @throws {Error} If the network request fails or the backend rejects the
+ *   report — callers are expected to log-and-continue, since losing one
+ *   metrics post must never break session teardown itself.
+ */
+export async function reportConversationMetrics(payload: ConversationMetricsPayload): Promise<void> {
+  const response = await fetch('/api/metrics/conversations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    // Lets an in-flight post survive the page being closed right after Stop —
+    // the exact moment this request is always made.
+    keepalive: true,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to report session metrics (status ${response.status})`);
+  }
+}
+
+/**
  * Fetches every language the interpreter supports, in both realtime and
  * cascade modes, so the language pair selector can render its options from
  * data instead of hardcoding a language list of its own.

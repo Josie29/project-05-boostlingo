@@ -108,6 +108,18 @@ export function prefixId(mode: SessionMode, id: string): string {
   return `${mode}:${id}`;
 }
 
+/**
+ * Recovers which mode {@link prefixId} namespaced an id under — the inverse
+ * direction, kept in this module so knowledge of the prefix scheme never
+ * leaks into consumers. Used when persisting metrics (issue #10 revisited):
+ * a conversation spanning a mid-session mode switch holds utterances from
+ * both transports, so each persisted utterance carries its own mode rather
+ * than inheriting one from the conversation.
+ */
+export function modeOfPrefixedId(id: string): SessionMode {
+  return id.startsWith('realtime:') ? 'realtime' : 'cascade';
+}
+
 /** {@link prefixId}, specialized to a {@link TranscriptUpdate}'s `utteranceId` — see `prefixId`'s remarks for why this matters. */
 export function prefixUtteranceId(mode: SessionMode, update: TranscriptUpdate): TranscriptUpdate {
   return { ...update, utteranceId: prefixId(mode, update.utteranceId) };

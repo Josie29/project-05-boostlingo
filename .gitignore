@@ -28,3 +28,6 @@ obj/
 *.wav
 *.mp3
 *.pcm
+
+# Local metrics database (SQLite)
+backend/data/

@@ -8,8 +8,11 @@ audio drift, or unbounded memory growth.
 > **Status: awaiting the live benchmark session.** Everything below the Method
 > section is a template to fill from a session run with a real `OPENAI_API_KEY`
 > (and optionally `TRANSLATION_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` for the
-> provider-swap variant). All latency figures come straight from the in-app
-> latency panel — no external tooling needed.
+> provider-swap variant). All latency figures are captured automatically: every
+> session's per-utterance latency reports and transcript are persisted to local
+> SQLite when Stop is pressed, and `GET /api/metrics/summary` returns the
+> median/p95 per stage, grouped per (mode, MT provider) — exactly the groupings
+> the tables below use. The in-app latency panel remains the live view.
 
 ## Method
 
@@ -18,9 +21,11 @@ audio drift, or unbounded memory growth.
    English↔Spanish conversation: alternate short utterances (3–8 words) and
    long ones (20+ words), include at least two deliberate barge-ins
    (cascade), and one mid-session mode switch at the end.
-3. Record from the latency panel: per-utterance end-to-end plus, for cascade,
-   the per-stage breakdown (speechEnd → sttFinal → mtFirstToken → ttsFirstByte
-   → playback). Note the session averages the panel maintains.
+3. Press Stop at the end of each session — that is what persists the run.
+   Then pull the figures: `curl -s localhost:5170/api/metrics/summary` gives
+   median/p95 end-to-end and per-stage (speechEnd → sttFinal → mtFirstToken →
+   ttsFirstByte → ttsEnd) per (mode, MT provider);
+   `/api/metrics/conversations` lists the captured sessions for sanity checks.
 4. Stability: watch for WebSocket/WebRTC disconnects (none expected), audible
    drift or playback backlog growth in cascade, and memory growth — browser
    task manager for the tab, `dotnet-counters monitor` (or Activity Monitor

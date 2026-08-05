@@ -3,6 +3,13 @@ DotNetEnv.Env.TraversePath().NoClobber().Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Enums cross the metrics wire as the same lowercase strings the frontend's
+// TypeScript unions use ("realtime"/"cascade", "source"/"target"), not integers or
+// PascalCase names - one vocabulary end to end. Reading is case-insensitive.
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.Converters.Add(
+        new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase)));
+
 // Typed HttpClient for minting ephemeral OpenAI Realtime client secrets. The
 // OPENAI_API_KEY itself is attached per-request inside OpenAiRealtimeSessionClient
 // and never exposed to callers of /api/realtime/session.
@@ -48,6 +55,17 @@ switch (translationProvider)
             $"Unrecognized TRANSLATION_PROVIDER '{translationProvider}'. Valid values: openai, anthropic.");
 }
 
+// Session-metrics persistence (#10 revisited; docs/tech-stack.md's amended entry):
+// local SQLite file, path overridable via METRICS_DB_PATH so tests and deployments
+// point elsewhere. The endpoints depend only on ISessionMetricsStore, so a cloud
+// deployment can swap in a managed database without touching them. The provider name
+// is registered alongside it because saved conversations are stamped with the MT
+// provider server-side - the frontend never knows which one is configured.
+var metricsDbPath = builder.Configuration["METRICS_DB_PATH"]
+    ?? Path.Combine(builder.Environment.ContentRootPath, "data", "metrics.db");
+builder.Services.AddSingleton<ISessionMetricsStore>(_ => new SqliteSessionMetricsStore(metricsDbPath));
+builder.Services.AddSingleton(new TranslationProviderName(translationProvider));
+
 // TTS (text-to-speech; #7) provider. Typed HttpClient, same pattern as
 // ITranslationProvider above - OPENAI_API_KEY is attached per-request inside
 // OpenAiTtsProvider and never exposed to callers of ITtsProvider.
@@ -82,6 +100,7 @@ app.MapGet("/healthz", () => Results.Ok(new HealthResponse("ok")));
 app.MapLanguageEndpoints();
 app.MapRealtimeSessionEndpoints();
 app.MapCascadeAudioEndpoints();
+app.MapMetricsEndpoints();
 
 LogOpenAiKeyStatus(app.Configuration, app.Logger);
 

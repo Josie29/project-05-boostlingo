@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
-import type { LanguagePair } from '../api';
+import { reportConversationMetrics, type ConversationMetricsPayload, type LanguagePair } from '../api';
 import { latencyReducer, selectLatencyAverages, selectRecentReports } from '../latency/latencyReducer';
 import { INITIAL_LATENCY_STATE, type LatencyReport, type LatencySessionAverages, type LatencyState } from '../latency/types';
 import { transcriptReducer } from '../transcript/transcriptReducer';
@@ -12,6 +12,7 @@ import {
 import { CascadeInterpreterSession } from './CascadeInterpreterSession';
 import {
   isLiveStatus,
+  modeOfPrefixedId,
   type InterpreterSession,
   type SessionErrorKind,
   type SessionMode,
@@ -151,6 +152,53 @@ export function useInterpreterSession(
   const [latencyState, dispatchLatency] = useReducer(reduceLatency, INITIAL_LATENCY_STATE);
   const [notice, setNotice] = useState<SessionNotice | null>(null);
 
+  // One conversation per Start press (issue #10 revisited): the id/start-time/pair
+  // captured when the user starts, kept in a ref because nothing renders from them.
+  // Survives mode switches and reconnects — like the transcript/latency history it
+  // labels, it is scoped to the *conversation*, not to any one transport session.
+  const conversationRef = useRef<{ id: string; startedAtMs: number; pair: LanguagePair } | null>(null);
+
+  /**
+   * Posts the conversation's accumulated latency reports and transcript for
+   * persistence. Fire-and-forget by design: metrics capture must never delay or
+   * break session teardown, so a failed post is logged and dropped. Safe to call
+   * repeatedly — the backend upserts on the conversation id, so a double Stop
+   * press replaces the stored report rather than duplicating it.
+   */
+  function reportConversation(): void {
+    const conversation = conversationRef.current;
+    // Nothing captured (Stop before any utterance, or Stop pressed twice after a
+    // fresh Start) — an all-empty report would only clutter the store.
+    if (conversation === null || (latencyState.reports.length === 0 && transcriptState.entries.length === 0)) {
+      return;
+    }
+
+    const payload: ConversationMetricsPayload = {
+      conversationId: conversation.id,
+      sourceLang: conversation.pair.sourceLang,
+      targetLang: conversation.pair.targetLang,
+      startedAtMs: conversation.startedAtMs,
+      endedAtMs: Date.now(),
+      utterances: latencyState.reports.map((report) => ({
+        utteranceId: report.utteranceId,
+        mode: modeOfPrefixedId(report.utteranceId),
+        endToEndMs: report.endToEndMs,
+        stages: report.stages.map(({ stage, ms }) => ({ stage, ms })),
+      })),
+      transcript: transcriptState.entries.map((entry) => ({
+        utteranceId: entry.id,
+        lane: entry.lane,
+        text: entry.text,
+        final: entry.final,
+        ...(entry.truncated ? { truncated: true } : {}),
+      })),
+    };
+
+    void reportConversationMetrics(payload).catch((error: unknown) => {
+      console.warn('Failed to persist session metrics; the session itself is unaffected.', error);
+    });
+  }
+
   useEffect(() => {
     return activeSession.subscribeToTranscript((update) => dispatchTranscript({ kind: 'update', update }));
   }, [activeSession]);
@@ -220,12 +268,21 @@ export function useInterpreterSession(
     notice,
     setMode,
     start: () => {
+      conversationRef.current = { id: crypto.randomUUID(), startedAtMs: Date.now(), pair };
       dispatchTranscript({ kind: 'reset' });
       dispatchLatency({ kind: 'reset' });
       setNotice(null);
       void activeSession.start(pair);
     },
-    stop: () => activeSession.stop(),
+    // Stop is the persistence point (issue #10 revisited): the user deliberately
+    // ending the conversation is the one moment its accumulated history is complete.
+    // Reconnect and mode switches don't report — the conversation isn't over yet —
+    // and unmount teardown doesn't either (nothing to render the result into, and
+    // benchmark sessions end with Stop, not navigation).
+    stop: () => {
+      reportConversation();
+      activeSession.stop();
+    },
     // Deliberately mirrors setMode's mid-session branch: stop() fully
     // releases the dead transport's resources before start() requests a
     // fresh mic stream, and neither transcript nor latency history is reset

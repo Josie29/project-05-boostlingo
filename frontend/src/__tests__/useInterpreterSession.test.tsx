@@ -1,5 +1,5 @@
 import { act, renderHook } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LanguagePair } from '../api';
 import type { LatencyReport } from '../latency/types';
 import type { InterpreterSession, SessionMode, SessionNotice, SessionState } from '../session/InterpreterSession';
@@ -83,6 +83,26 @@ function createInstantFakeSession(mode: SessionMode, callOrder: string[]): Inter
 
 describe('useInterpreterSession', () => {
   const PAIR: LanguagePair = { sourceLang: 'en', targetLang: 'es' };
+
+  // stop() posts captured metrics (issue #10 revisited), so every test in this file
+  // needs a fetch that succeeds quietly; tests about the post itself inspect this stub.
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 });
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** The JSON body of the metrics post a test's Stop press produced. */
+  function postedMetricsBody(): { [key: string]: unknown } & {
+    utterances: { utteranceId: string; mode: string }[];
+  } {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/metrics/conversations');
+    expect(init.method).toBe('POST');
+    return JSON.parse(init.body as string);
+  }
 
   // Catches the bug where the toggle only takes effect on a later render (or not at
   // all) when no session is live yet: picking Cascade before pressing Start must
@@ -408,5 +428,87 @@ describe('useInterpreterSession', () => {
     act(() => result.current.reconnect());
 
     expect(result.current.notice).toBeNull();
+  });
+
+  // Catches a benchmark session leaving no trace behind (issue #10 revisited): the
+  // latency reports and transcript the panel showed during the conversation must be
+  // posted for persistence when the user presses Stop, carrying the language pair the
+  // session was started with — otherwise docs/benchmarks.md has nothing to fill from.
+  it('posts the accumulated latency reports and transcript when the user stops', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() =>
+      realtimeSession.emitLatency({
+        utteranceId: 'realtime:turn-1',
+        stages: [{ stage: 'speechEnd', ms: 250 }],
+        endToEndMs: 1_200,
+      }),
+    );
+    act(() =>
+      realtimeSession.emitTranscript({ utteranceId: 'realtime:turn-1', lane: 'source', text: 'hello', final: true }),
+    );
+    act(() => result.current.stop());
+
+    const body = postedMetricsBody();
+    expect(body.conversationId).toEqual(expect.any(String));
+    expect(body.sourceLang).toBe('en');
+    expect(body.targetLang).toBe('es');
+    expect(body.utterances).toEqual([
+      {
+        utteranceId: 'realtime:turn-1',
+        mode: 'realtime',
+        endToEndMs: 1_200,
+        stages: [{ stage: 'speechEnd', ms: 250 }],
+      },
+    ]);
+    expect(body.transcript).toEqual([{ utteranceId: 'realtime:turn-1', lane: 'source', text: 'hello', final: true }]);
+  });
+
+  // Catches the comparison's numbers getting misattributed after a mid-session mode
+  // switch: one conversation then holds utterances from BOTH transports, and each
+  // persisted utterance must carry the mode that actually produced it — a
+  // conversation-level mode would silently file the pre-switch turns under the
+  // post-switch transport.
+  it('attributes each posted utterance to the transport that produced it across a mode switch', async () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitLatency({ utteranceId: 'realtime:turn-1', stages: [], endToEndMs: 1_100 }));
+    await act(async () => result.current.setMode('cascade'));
+    act(() => cascadeSession.emitLatency({ utteranceId: 'cascade:turn-2', stages: [], endToEndMs: 2_100 }));
+    act(() => result.current.stop());
+
+    expect(postedMetricsBody().utterances.map(({ utteranceId, mode }) => ({ utteranceId, mode }))).toEqual([
+      { utteranceId: 'realtime:turn-1', mode: 'realtime' },
+      { utteranceId: 'cascade:turn-2', mode: 'cascade' },
+    ]);
+  });
+
+  // Catches empty junk rows accumulating in the metrics store: a Stop with nothing
+  // captured (pressed before any utterance, or a second press after teardown) must
+  // not post at all.
+  it('does not post metrics when the conversation captured nothing', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => result.current.stop());
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
