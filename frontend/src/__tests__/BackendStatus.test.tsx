@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BackendStatus } from '../components/BackendStatus';
 
@@ -45,5 +45,33 @@ describe('BackendStatus', () => {
     await waitFor(() =>
       expect(screen.getByText('Backend unreachable')).toBeInTheDocument(),
     );
+  });
+
+  // Catches the bug where starting the backend after the page loads left the
+  // badge stuck on "unreachable" forever until a manual refresh.
+  it('recovers to "connected" when a later poll succeeds', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.useFakeTimers();
+
+    try {
+      render(<BackendStatus />);
+
+      // Flush only the first (failing) poll's promise, no timer advance yet.
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(screen.getByText('Backend unreachable')).toBeInTheDocument();
+
+      // Advance past the re-check interval; the second poll succeeds.
+      await act(() => vi.advanceTimersByTimeAsync(5000));
+      expect(screen.getByText('Backend connected')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

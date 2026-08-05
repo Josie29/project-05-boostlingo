@@ -1,9 +1,8 @@
 import type { CascadeAudioCapture } from './CascadeAudioCapture';
 import { MicPcmCapture } from './MicPcmCapture';
 import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
-import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
-import { MicAccessError, wrapMicError } from '../audio/micErrors';
 import { ListenerSet } from '../session/listenerSet';
+import { runSessionStart } from '../session/sessionStart';
 import {
   CASCADE_ENVELOPE_VERSION,
   CascadeMessageType,
@@ -222,46 +221,20 @@ export class CascadeSessionController {
    *   matching the backend's own default.
    */
   async start(pair: LanguagePair = DEFAULT_LANGUAGE_PAIR): Promise<void> {
-    if (
-      this.state.status === 'requesting-mic' ||
-      this.state.status === 'connecting' ||
-      this.state.status === 'connected'
-    ) {
-      return;
-    }
-
-    const myGeneration = ++this.generation;
-    this.setState('requesting-mic');
-
-    try {
-      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS }).catch((rawError: unknown) => {
-        throw wrapMicError(rawError);
-      });
-      if (myGeneration !== this.generation) {
-        // stop() ran while the mic prompt was pending; discard the now-unwanted stream.
-        for (const track of localStream.getTracks()) track.stop();
-        return;
-      }
-      this.localStream = localStream;
-
-      this.setState('connecting');
-      await this.connectAndStream(localStream, pair);
-      if (myGeneration !== this.generation) return;
-
-      this.setState('connected');
-    } catch (error) {
-      if (myGeneration !== this.generation) return;
-      this.teardown(false);
-      if (error instanceof MicAccessError) {
-        this.setState('error', error.message, error.kind);
-        return;
-      }
-      const message = error instanceof Error ? error.message : 'Failed to start the cascade session.';
-      // Never reconnectable here: every failure this catch can see happened
-      // before `'connected'` was ever reached — see `handlePostConnectFailure`
-      // for the mid-session, reconnectable case (issue #12).
-      this.setState('error', message);
-    }
+    await runSessionStart({
+      status: this.state.status,
+      bumpGeneration: () => ++this.generation,
+      isCurrent: (generation) => generation === this.generation,
+      setState: (status, errorMessage, errorKind, reconnectable) =>
+        this.setState(status, errorMessage, errorKind, reconnectable),
+      getUserMedia: this.deps.getUserMedia,
+      storeStream: (stream) => {
+        this.localStream = stream;
+      },
+      connect: (stream) => this.connectAndStream(stream, pair),
+      teardown: () => this.teardown(false),
+      fallbackErrorMessage: 'Failed to start the cascade session.',
+    });
   }
 
   /**

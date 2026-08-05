@@ -1,7 +1,6 @@
 import { createRealtimeSession, type LanguagePair, type RealtimeSessionInfo } from '../api';
-import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
-import { MicAccessError, wrapMicError } from '../audio/micErrors';
 import { ListenerSet } from '../session/listenerSet';
+import { runSessionStart } from '../session/sessionStart';
 import {
   INITIAL_REALTIME_SESSION_STATE,
   type RealtimeErrorKind,
@@ -189,101 +188,85 @@ export class RealtimeSessionController {
    *   backend's own en -> es default is the single source of truth for it.
    */
   async start(pair?: LanguagePair): Promise<void> {
-    if (
-      this.state.status === 'requesting-mic' ||
-      this.state.status === 'connecting' ||
-      this.state.status === 'connected'
-    ) {
-      return;
+    await runSessionStart({
+      status: this.state.status,
+      bumpGeneration: () => ++this.generation,
+      isCurrent: (generation) => generation === this.generation,
+      setState: (status, errorMessage, errorKind, reconnectable) =>
+        this.setState(status, errorMessage, errorKind, reconnectable),
+      getUserMedia: this.deps.getUserMedia,
+      storeStream: (stream) => {
+        this.localStream = stream;
+      },
+      connect: (stream, generation) => this.connect(stream, generation, pair),
+      teardown: () => this.teardown(),
+      fallbackErrorMessage: 'Failed to start the realtime session.',
+    });
+  }
+
+  /**
+   * The transport-specific half of {@link start}: fetches an ephemeral token
+   * and negotiates the WebRTC peer connection. Shared scaffolding (mic
+   * acquisition, state transitions, error classification) lives in
+   * {@link runSessionStart}.
+   */
+  private async connect(localStream: MediaStream, myGeneration: number, pair?: LanguagePair): Promise<void> {
+    const sessionInfo = await this.deps.fetchSessionInfo(pair);
+    if (myGeneration !== this.generation) return;
+
+    const peerConnection = this.deps.createPeerConnection();
+    this.peerConnection = peerConnection;
+
+    for (const track of localStream.getTracks()) {
+      peerConnection.addTrack(track, localStream);
     }
 
-    const myGeneration = ++this.generation;
-    this.setState('requesting-mic');
-
-    try {
-      const localStream = await this.deps.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS }).catch((rawError: unknown) => {
-        throw wrapMicError(rawError);
-      });
-      if (myGeneration !== this.generation) {
-        // stop() ran while the mic prompt was pending; discard the now-unwanted stream.
-        for (const track of localStream.getTracks()) track.stop();
-        return;
-      }
-      this.localStream = localStream;
-
-      this.setState('connecting');
-      const sessionInfo = await this.deps.fetchSessionInfo(pair);
+    peerConnection.ontrack = (event) => {
+      this.audioElement.srcObject = event.streams[0] ?? null;
+    };
+    // Issue #12: the only way this controller previously noticed a dead peer
+    // connection was the user hitting Stop — a network drop or the remote
+    // side hanging up mid-call left `status` stuck on `'connected'` forever.
+    // `'failed'` means the media path is unrecoverable and is fatal
+    // immediately. `'disconnected'` is a routine, often self-recovering ICE
+    // blip (see `DISCONNECT_GRACE_MS`) rather than an immediate failure. A
+    // transition back to `'connected'` cancels any pending grace timer.
+    // `'closed'` is excluded since our own `teardown()` reaching this same
+    // state is expected, not a failure to report.
+    peerConnection.onconnectionstatechange = () => {
       if (myGeneration !== this.generation) return;
-
-      const peerConnection = this.deps.createPeerConnection();
-      this.peerConnection = peerConnection;
-
-      for (const track of localStream.getTracks()) {
-        peerConnection.addTrack(track, localStream);
-      }
-
-      peerConnection.ontrack = (event) => {
-        this.audioElement.srcObject = event.streams[0] ?? null;
-      };
-      // Issue #12: the only way this controller previously noticed a dead peer
-      // connection was the user hitting Stop — a network drop or the remote
-      // side hanging up mid-call left `status` stuck on `'connected'` forever.
-      // `'failed'` means the media path is unrecoverable and is fatal
-      // immediately. `'disconnected'` is a routine, often self-recovering ICE
-      // blip (see `DISCONNECT_GRACE_MS`) rather than an immediate failure. A
-      // transition back to `'connected'` cancels any pending grace timer.
-      // `'closed'` is excluded since our own `teardown()` reaching this same
-      // state is expected, not a failure to report.
-      peerConnection.onconnectionstatechange = () => {
-        if (myGeneration !== this.generation) return;
-        const state = peerConnection.connectionState;
-        if (state === 'failed') {
-          this.clearDisconnectTimer();
+      const state = peerConnection.connectionState;
+      if (state === 'failed') {
+        this.clearDisconnectTimer();
+        this.handlePostConnectFailure('The realtime connection was lost.');
+      } else if (state === 'disconnected') {
+        this.clearDisconnectTimer();
+        this.disconnectTimer = setTimeout(() => {
+          this.disconnectTimer = null;
+          if (myGeneration !== this.generation) return;
           this.handlePostConnectFailure('The realtime connection was lost.');
-        } else if (state === 'disconnected') {
-          this.clearDisconnectTimer();
-          this.disconnectTimer = setTimeout(() => {
-            this.disconnectTimer = null;
-            if (myGeneration !== this.generation) return;
-            this.handlePostConnectFailure('The realtime connection was lost.');
-          }, DISCONNECT_GRACE_MS);
-        } else if (state === 'connected') {
-          this.clearDisconnectTimer();
-        }
-      };
-
-      this.dataChannel = peerConnection.createDataChannel(DATA_CHANNEL_LABEL);
-      this.dataChannel.onopen = () => {
-        this.dataChannel?.send(JSON.stringify(ENABLE_INPUT_TRANSCRIPTION_EVENT));
-      };
-      this.dataChannel.onmessage = (event: MessageEvent<string>) => this.handleDataChannelMessage(event.data);
-
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      if (!offer.sdp) {
-        throw new Error('Failed to create a local SDP offer.');
+        }, DISCONNECT_GRACE_MS);
+      } else if (state === 'connected') {
+        this.clearDisconnectTimer();
       }
+    };
 
-      const answerSdp = await this.deps.postOffer(offer.sdp, sessionInfo);
-      if (myGeneration !== this.generation) return;
+    this.dataChannel = peerConnection.createDataChannel(DATA_CHANNEL_LABEL);
+    this.dataChannel.onopen = () => {
+      this.dataChannel?.send(JSON.stringify(ENABLE_INPUT_TRANSCRIPTION_EVENT));
+    };
+    this.dataChannel.onmessage = (event: MessageEvent<string>) => this.handleDataChannelMessage(event.data);
 
-      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-      if (myGeneration !== this.generation) return;
-
-      this.setState('connected');
-    } catch (error) {
-      if (myGeneration !== this.generation) return;
-      this.teardown();
-      if (error instanceof MicAccessError) {
-        this.setState('error', error.message, error.kind);
-        return;
-      }
-      const message = error instanceof Error ? error.message : 'Failed to start the realtime session.';
-      // Never reconnectable here: every failure this catch can see happened
-      // before `'connected'` was ever reached (mic/token/negotiation) — see
-      // `handlePostConnectFailure` for the mid-session, reconnectable case.
-      this.setState('error', message);
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    if (!offer.sdp) {
+      throw new Error('Failed to create a local SDP offer.');
     }
+
+    const answerSdp = await this.deps.postOffer(offer.sdp, sessionInfo);
+    if (myGeneration !== this.generation) return;
+
+    await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
   }
 
   /**
