@@ -1,35 +1,44 @@
 /// <summary>
-/// A single speech-to-text (STT) segment - one partial update or the final wording of
-/// one utterance. Providers emit a stream of these; <c>IsFinal</c> distinguishes a
-/// still-changing partial from the settled transcript for that utterance.
+/// What one <see cref="SttSegment"/> represents. A single discriminator (rather than
+/// independent bool flags) makes the four kinds mutually exclusive by construction -
+/// there is no way to build a segment that is simultaneously a final transcript and a
+/// speech-end marker, and consumers switch on one value instead of checking flags in a
+/// documented order.
 /// </summary>
-/// <param name="UtteranceId">Stable id shared by every partial and the one final
-/// segment that belong to the same spoken utterance, so consumers can replace rather
-/// than append as text firms up.</param>
+public enum SttSegmentKind
+{
+    /// <summary>An in-progress transcript update whose text may still change.</summary>
+    Partial,
+
+    /// <summary>The settled transcript for this utterance (e.g. VAD (Voice Activity
+    /// Detection) decided the speaker stopped).</summary>
+    Final,
+
+    /// <summary>A speech-onset marker (#11, barge-in detection) - see
+    /// <see cref="SttSegment.SpeechStart"/>. No transcript text, no utterance id.</summary>
+    SpeechStart,
+
+    /// <summary>A speech-end boundary marker (#10, per-stage latency instrumentation) -
+    /// see <see cref="SttSegment.SpeechEnd"/>. No transcript text.</summary>
+    SpeechEnd,
+}
+
+/// <summary>
+/// A single speech-to-text (STT) segment: a partial or final transcript update, or a
+/// VAD boundary marker - see <see cref="SttSegmentKind"/> for the four kinds.
+/// </summary>
+/// <param name="UtteranceId">Stable id shared by every partial, the one final segment,
+/// and the speech-end marker that belong to the same spoken utterance, so consumers
+/// can replace rather than append as text firms up and key latency marks
+/// consistently. Empty on <see cref="SttSegmentKind.SpeechStart"/> markers (see
+/// <see cref="SpeechStart"/>'s remarks).</param>
 /// <param name="Text">The transcript text recognized so far (partial) or in full
-/// (final).</param>
-/// <param name="IsFinal"><c>true</c> once the provider considers this utterance done
-/// (e.g. VAD detected the speaker stopped); <c>false</c> for an in-progress partial.</param>
+/// (final); always empty on markers.</param>
+/// <param name="Kind">Which of the four kinds this segment is.</param>
 /// <param name="TimestampMs">Milliseconds since the stream started, for latency
 /// instrumentation and ordering.</param>
-/// <param name="IsSpeechEndMarker"><c>true</c> for a speech-end boundary marker (see
-/// <see cref="SpeechEnd"/>) rather than an actual transcript update - the provider's
-/// VAD (Voice Activity Detection) decided the speaker's turn is over and committed it,
-/// ahead of any transcript text. <c>Text</c> is always empty and <c>IsFinal</c> is
-/// always <c>false</c> on a marker; consumers should check this flag first and skip
-/// transcript handling entirely when it is set. Defaults to <c>false</c> so every
-/// existing call site constructing a real transcript segment is unaffected.</param>
-/// <param name="IsSpeechStartMarker"><c>true</c> for a speech-onset marker (see
-/// <see cref="SpeechStart"/>) - the provider's VAD detected the speaker beginning a new
-/// utterance, ahead of any transcript text and before the provider has assigned it an
-/// item id (see <see cref="SpeechStart"/>'s remarks on <c>UtteranceId</c>). This is the
-/// signal <c>CascadePipeline</c> uses to detect a barge-in (#11): speech starting again
-/// while downstream work for a still-unfinished earlier utterance may be in flight.
-/// Mutually exclusive with <see cref="IsSpeechEndMarker"/> - never both <c>true</c> on
-/// the same segment. Defaults to <c>false</c> so every existing call site constructing
-/// a real transcript segment or a speech-end marker is unaffected.</param>
 public sealed record SttSegment(
-    string UtteranceId, string Text, bool IsFinal, long TimestampMs, bool IsSpeechEndMarker = false, bool IsSpeechStartMarker = false)
+    string UtteranceId, string Text, SttSegmentKind Kind, long TimestampMs)
 {
     /// <summary>
     /// Creates a speech-end boundary marker (#10, per-stage latency instrumentation):
@@ -41,9 +50,9 @@ public sealed record SttSegment(
     /// </summary>
     /// <param name="utteranceId">The id this utterance's later transcript segments will share.</param>
     /// <param name="timestampMs">Milliseconds since the stream started.</param>
-    /// <returns>A marker segment with empty text and <c>IsFinal: false</c>.</returns>
+    /// <returns>A <see cref="SttSegmentKind.SpeechEnd"/> marker segment with empty text.</returns>
     public static SttSegment SpeechEnd(string utteranceId, long timestampMs) =>
-        new(utteranceId, Text: string.Empty, IsFinal: false, timestampMs, IsSpeechEndMarker: true);
+        new(utteranceId, Text: string.Empty, SttSegmentKind.SpeechEnd, timestampMs);
 
     /// <summary>
     /// Creates a speech-onset marker (#11, barge-in detection): no transcript text,
@@ -56,9 +65,9 @@ public sealed record SttSegment(
     /// scoped to a particular utterance.
     /// </summary>
     /// <param name="timestampMs">Milliseconds since the stream started.</param>
-    /// <returns>A marker segment with empty id/text and <c>IsFinal: false</c>.</returns>
+    /// <returns>A <see cref="SttSegmentKind.SpeechStart"/> marker segment with empty id/text.</returns>
     public static SttSegment SpeechStart(long timestampMs) =>
-        new(UtteranceId: string.Empty, Text: string.Empty, IsFinal: false, timestampMs, IsSpeechStartMarker: true);
+        new(UtteranceId: string.Empty, Text: string.Empty, SttSegmentKind.SpeechStart, timestampMs);
 }
 
 /// <summary>Per-session configuration an <see cref="ISttProvider"/> needs to start a stream.</summary>

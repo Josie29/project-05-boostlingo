@@ -114,9 +114,9 @@ public class OpenAiSttProviderTests
         Assert.Equal(2, segments.Count);
         Assert.Equal("item-1", segments[0].UtteranceId);
         Assert.Equal("Hel", segments[0].Text);
-        Assert.False(segments[0].IsFinal);
+        Assert.Equal(SttSegmentKind.Partial, segments[0].Kind);
         Assert.Equal("Hello", segments[1].Text);
-        Assert.True(segments[1].IsFinal);
+        Assert.Equal(SttSegmentKind.Final, segments[1].Kind);
     }
 
     /// <summary>
@@ -170,10 +170,9 @@ public class OpenAiSttProviderTests
         }
 
         var marker = Assert.Single(segments);
-        Assert.True(marker.IsSpeechEndMarker);
+        Assert.Equal(SttSegmentKind.SpeechEnd, marker.Kind);
         Assert.Equal("item-1", marker.UtteranceId);
         Assert.Equal(string.Empty, marker.Text);
-        Assert.False(marker.IsFinal);
     }
 
     /// <summary>
@@ -227,11 +226,9 @@ public class OpenAiSttProviderTests
         }
 
         var marker = Assert.Single(segments);
-        Assert.True(marker.IsSpeechStartMarker);
-        Assert.False(marker.IsSpeechEndMarker);
+        Assert.Equal(SttSegmentKind.SpeechStart, marker.Kind);
         Assert.Equal(string.Empty, marker.UtteranceId);
         Assert.Equal(string.Empty, marker.Text);
-        Assert.False(marker.IsFinal);
     }
 
     /// <summary>
@@ -262,7 +259,7 @@ public class OpenAiSttProviderTests
         var onlySegment = Assert.Single(segments);
         Assert.Equal("item-1", onlySegment.UtteranceId);
         Assert.Equal("Hello", onlySegment.Text);
-        Assert.True(onlySegment.IsFinal);
+        Assert.Equal(SttSegmentKind.Final, onlySegment.Kind);
     }
 
     /// <summary>

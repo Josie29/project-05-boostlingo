@@ -58,8 +58,8 @@ public class CascadePipelineTests
         var sink = new FakeEventSink();
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-1", "Hola", IsFinal: false, TimestampMs: 100));
-        stream.Emit(new SttSegment("utt-1", "Hola mundo", IsFinal: true, TimestampMs: 250));
+        stream.Emit(new SttSegment("utt-1", "Hola", SttSegmentKind.Partial, TimestampMs: 100));
+        stream.Emit(new SttSegment("utt-1", "Hola mundo", SttSegmentKind.Final, TimestampMs: 250));
 
         var partial = await sink.Sent.Reader.ReadAsync(TestTimeout());
         var final = await sink.Sent.Reader.ReadAsync(TestTimeout());
@@ -173,7 +173,7 @@ public class CascadePipelineTests
         var errorEnvelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
 
-        newStream.Emit(new SttSegment("utt-1", "Hola", IsFinal: true, TimestampMs: 10));
+        newStream.Emit(new SttSegment("utt-1", "Hola", SttSegmentKind.Final, TimestampMs: 10));
         var transcriptEnvelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.TranscriptFinal, transcriptEnvelope.Type);
 
@@ -255,7 +255,7 @@ public class CascadePipelineTests
         var events = new LaneSplitEventReader(sink);
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-1", "Hello world", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "Hello world", SttSegmentKind.Final, TimestampMs: 10));
 
         var targetPartial1 = await events.Target.Reader.ReadAsync(TestTimeout());
         var targetPartial2 = await events.Target.Reader.ReadAsync(TestTimeout());
@@ -297,7 +297,7 @@ public class CascadePipelineTests
         var events = new LaneSplitEventReader(sink);
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-1", "Hello", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "Hello", SttSegmentKind.Final, TimestampMs: 10));
 
         // The gate is still closed - the fake provider has not been allowed to yield
         // its second token or complete - yet the first partial must already be here.
@@ -333,8 +333,8 @@ public class CascadePipelineTests
         var events = new LaneSplitEventReader(sink);
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-a", "Hello", IsFinal: true, TimestampMs: 10));
-        stream.Emit(new SttSegment("utt-b", "World", IsFinal: true, TimestampMs: 20));
+        stream.Emit(new SttSegment("utt-a", "Hello", SttSegmentKind.Final, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-b", "World", SttSegmentKind.Final, TimestampMs: 20));
 
         // Utterance A's first partial arrives, but A's translation is still gated -
         // utterance B (already queued behind it) must not have started translating yet.
@@ -374,7 +374,7 @@ public class CascadePipelineTests
         var events = new LaneSplitEventReader(sink);
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-a", "Bad", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-a", "Bad", SttSegmentKind.Final, TimestampMs: 10));
 
         var errorEnvelope = await events.Other.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
@@ -386,7 +386,7 @@ public class CascadePipelineTests
         Assert.Equal("utt-a", errorPayload.UtteranceId);
         Assert.True(errorPayload.Recoverable);
 
-        stream.Emit(new SttSegment("utt-b", "Good", IsFinal: true, TimestampMs: 20));
+        stream.Emit(new SttSegment("utt-b", "Good", SttSegmentKind.Final, TimestampMs: 20));
 
         var partialB = await events.Target.Reader.ReadAsync(TestTimeout());
         var finalB = await events.Target.Reader.ReadAsync(TestTimeout());
@@ -414,7 +414,7 @@ public class CascadePipelineTests
         var events = new LaneSplitEventReader(sink);
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-a", "Bad", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-a", "Bad", SttSegmentKind.Final, TimestampMs: 10));
 
         var errorEnvelope = await events.Other.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.Error, errorEnvelope.Type);
@@ -445,7 +445,7 @@ public class CascadePipelineTests
         var sink = new FakeEventSink();
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-1", "   ", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "   ", SttSegmentKind.Final, TimestampMs: 10));
 
         var envelope = await sink.Sent.Reader.ReadAsync(TestTimeout());
         Assert.Equal(CascadeMessageTypes.TranscriptFinal, envelope.Type);
@@ -473,7 +473,7 @@ public class CascadePipelineTests
         var events = new LaneSplitEventReader(sink);
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-1", "Hello", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "Hello", SttSegmentKind.Final, TimestampMs: 10));
 
         // Draining through the final target-lane envelope guarantees the pipeline's
         // synchronous continuation - which notifies observers for that same token
@@ -527,8 +527,8 @@ public class CascadePipelineTests
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
         stream.Emit(SttSegment.SpeechEnd("utt-1", 5));
-        stream.Emit(new SttSegment("utt-1", "Hello", IsFinal: false, TimestampMs: 10));
-        stream.Emit(new SttSegment("utt-1", "Hello world", IsFinal: true, TimestampMs: 50));
+        stream.Emit(new SttSegment("utt-1", "Hello", SttSegmentKind.Partial, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "Hello world", SttSegmentKind.Final, TimestampMs: 50));
 
         string[] expectedStages =
         [

@@ -214,7 +214,7 @@ public sealed class OpenAiSttProvider(
                         ? new SttSegment(
                             UtteranceId: deltaItemId,
                             Text: GetString(root, "delta") ?? string.Empty,
-                            IsFinal: false,
+                            SttSegmentKind.Partial,
                             TimestampMs: timestampMs)
                         : null;
 
@@ -223,7 +223,7 @@ public sealed class OpenAiSttProvider(
                         ? new SttSegment(
                             UtteranceId: completedItemId,
                             Text: GetString(root, "transcript") ?? string.Empty,
-                            IsFinal: true,
+                            SttSegmentKind.Final,
                             TimestampMs: timestampMs)
                         : null;
 

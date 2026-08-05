@@ -284,26 +284,27 @@ public sealed class CascadePipeline(
         {
             await foreach (var segment in stream.ReadSegmentsAsync(cancellationToken))
             {
-                if (segment.IsSpeechStartMarker)
+                if (segment.Kind == SttSegmentKind.SpeechStart)
                 {
                     await HandleBargeInAsync(events, cancellationToken);
                     continue;
                 }
 
-                if (segment.IsSpeechEndMarker)
+                if (segment.Kind == SttSegmentKind.SpeechEnd)
                 {
                     await CascadeLatencyMarks.EmitAsync(
                         segment.UtteranceId, CascadeLatencyStages.SpeechEnd, events, logger, cancellationToken);
                     continue;
                 }
 
-                var envelopeType = segment.IsFinal ? CascadeMessageTypes.TranscriptFinal : CascadeMessageTypes.TranscriptPartial;
+                var isFinal = segment.Kind == SttSegmentKind.Final;
+                var envelopeType = isFinal ? CascadeMessageTypes.TranscriptFinal : CascadeMessageTypes.TranscriptPartial;
                 await events.SendEventAsync(
                     envelopeType,
                     new CascadeTranscriptPayload(segment.UtteranceId, CascadeTranscriptLanes.Source, segment.Text, segment.TimestampMs),
                     cancellationToken);
 
-                if (segment.IsFinal)
+                if (isFinal)
                 {
                     await CascadeLatencyMarks.EmitAsync(
                         segment.UtteranceId, CascadeLatencyStages.SttFinal, events, logger, cancellationToken);
@@ -320,7 +321,7 @@ public sealed class CascadePipeline(
                         segment.UtteranceId, CascadeLatencyStages.SttFirstPartial, events, logger, cancellationToken);
                 }
 
-                if (segment.IsFinal && !string.IsNullOrWhiteSpace(segment.Text))
+                if (isFinal && !string.IsNullOrWhiteSpace(segment.Text))
                 {
                     // Registered before the write below, not after, so a barge-in
                     // marker arriving for the very next segment (read by this same

@@ -160,7 +160,7 @@ public static class CascadeLatencyStages
     /// The STT (speech-to-text) provider's VAD (Voice Activity Detection) decided the
     /// speaker's turn is complete and committed it as a conversation item - the
     /// earliest cross-network signal of "speech end" the cascade has, ahead of any
-    /// transcript text. See <see cref="SttSegment.IsSpeechEndMarker"/>.
+    /// transcript text. See <see cref="SttSegmentKind.SpeechEnd"/>.
     /// </summary>
     public const string SpeechEnd = "speechEnd";
 

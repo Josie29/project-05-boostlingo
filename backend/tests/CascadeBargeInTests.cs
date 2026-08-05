@@ -32,7 +32,7 @@ public class CascadeBargeInTests
         var sink = new FakeEventSink();
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-a", "Hola", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-a", "Hola", SttSegmentKind.Final, TimestampMs: 10));
 
         // Waits for the provider to actually yield its first audio chunk - proving
         // synthesis genuinely started - before triggering the barge-in below.
@@ -80,13 +80,13 @@ public class CascadeBargeInTests
         var sink = new FakeEventSink();
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-a", "Hola", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-a", "Hola", SttSegmentKind.Final, TimestampMs: 10));
         await audio.Started.WaitAsync(TestTimeout());
 
         // utt-a's synthesis is now permanently blocked (until cancelled) - utt-b's
         // translation still runs to completion and queues its own phrase behind it in
         // the TTS observer's channel, which the pump never reaches while stuck on utt-a.
-        stream.Emit(new SttSegment("utt-b", "World", IsFinal: true, TimestampMs: 20));
+        stream.Emit(new SttSegment("utt-b", "World", SttSegmentKind.Final, TimestampMs: 20));
         var targetFinalB = await ReadTargetLaneFinalAsync(sink.Sent, "utt-b-target", TestTimeout());
         Assert.Equal("Mundo", targetFinalB);
 
@@ -127,7 +127,7 @@ public class CascadeBargeInTests
         var sink = new FakeEventSink();
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
-        stream.Emit(new SttSegment("utt-a", "Hola", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-a", "Hola", SttSegmentKind.Final, TimestampMs: 10));
         await audio.Started.WaitAsync(TestTimeout());
 
         // Drain the one binary frame utt-a's synthesis already sent before it got
@@ -139,7 +139,7 @@ public class CascadeBargeInTests
 
         // The new utterance the speaker just started speaking - the one the barge-in
         // itself signalled - flows through the whole cascade with no special handling.
-        stream.Emit(new SttSegment("utt-c", "Bye", IsFinal: true, TimestampMs: 30));
+        stream.Emit(new SttSegment("utt-c", "Bye", SttSegmentKind.Final, TimestampMs: 30));
 
         var start = await ReadUntilAsync(sink.Sent, CascadeMessageTypes.TtsAudioStart, TestTimeout());
         Assert.Equal("utt-c-target", Assert.IsType<CascadeTtsAudioStartPayload>(start.Payload).UtteranceId);
@@ -165,7 +165,7 @@ public class CascadeBargeInTests
 
         await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
         stream.Emit(SttSegment.SpeechStart(0));
-        stream.Emit(new SttSegment("utt-1", "Hello", IsFinal: true, TimestampMs: 10));
+        stream.Emit(new SttSegment("utt-1", "Hello", SttSegmentKind.Final, TimestampMs: 10));
 
         // PumpSegmentsAsync processes segments strictly in arrival order on one task, so
         // the very first envelope to reach the sink is proof nothing (bargein or
