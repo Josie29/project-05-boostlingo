@@ -25,7 +25,7 @@ using System.Threading.Channels;
 /// </remarks>
 public sealed class CascadePipeline(
     ISttProvider sttProvider,
-    ITranslationProvider translationProvider,
+    ITranslationProviderSelector translationProviders,
     IEnumerable<ITranslationObserver> translationObservers,
     ILogger<CascadePipeline> logger) : ICascadePipeline
 {
@@ -61,6 +61,13 @@ public sealed class CascadePipeline(
     private Task? _translationPumpTask;
     private CancellationTokenSource? _pumpCts;
     private CascadeSessionConfig? _config;
+
+    /// <summary>
+    /// The MT provider resolved from this session's negotiated choice (Lab P1) —
+    /// resolved once in <see cref="OnSessionStartedAsync"/> so every utterance in a
+    /// session runs on one provider, whatever the process default changes to.
+    /// </summary>
+    private ITranslationProvider? _translationProvider;
 
     /// <summary>
     /// The STT (speech-to-text) language hint negotiated for this session, computed
@@ -103,6 +110,7 @@ public sealed class CascadePipeline(
         }
 
         _config = config;
+        _translationProvider = translationProviders.Resolve(config.MtProvider);
 
         // Looked up from the language registry (rather than passing config.SourceLang
         // straight through) so a provider whose language hint differs from the wire
@@ -116,7 +124,8 @@ public sealed class CascadePipeline(
 
         try
         {
-            _sttStream = await sttProvider.StartStreamAsync(new SttStreamConfig(_sttLanguageHint), cancellationToken);
+            _sttStream = await sttProvider.StartStreamAsync(
+                new SttStreamConfig(_sttLanguageHint, config.SttModel), cancellationToken);
         }
         catch (SttProviderUnavailableException ex)
         {
@@ -384,7 +393,8 @@ public sealed class CascadePipeline(
 
         try
         {
-            var stream = await sttProvider.StartStreamAsync(new SttStreamConfig(_sttLanguageHint!), cancellationToken);
+            var stream = await sttProvider.StartStreamAsync(
+                new SttStreamConfig(_sttLanguageHint!, _config?.SttModel), cancellationToken);
             _sttStream = stream;
             return stream;
         }
@@ -490,7 +500,7 @@ public sealed class CascadePipeline(
         try
         {
             var request = new TranslationRequest(segment.Text, _config!.SourceLang, _config.TargetLang);
-            await foreach (var token in translationProvider.TranslateAsync(request, translationToken))
+            await foreach (var token in _translationProvider!.TranslateAsync(request, translationToken))
             {
                 if (token.Length == 0)
                 {

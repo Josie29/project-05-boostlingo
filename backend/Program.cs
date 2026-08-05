@@ -25,35 +25,32 @@ builder.Services.AddHttpClient<IRealtimeSessionClient, OpenAiRealtimeSessionClie
 builder.Services.AddSingleton<IRealtimeSocketFactory, ClientWebSocketRealtimeSocketFactory>();
 builder.Services.AddSingleton<ISttProvider, OpenAiSttProvider>();
 
-// MT (machine translation; #6) provider, selected via TRANSLATION_PROVIDER
-// ("openai" default, or "anthropic" - the provider-swap demo, #17). Typed
-// HttpClient either way, same pattern as IRealtimeSessionClient above - the API key
-// is attached per-request inside the provider and never exposed to callers of
-// ITranslationProvider. An unrecognized value fails startup rather than silently
-// falling back, so a config typo can't quietly run the wrong provider.
+// MT (machine translation; #6) providers. BOTH are registered (Lab P1): the
+// TRANSLATION_PROVIDER value ("openai" default, or "anthropic" - the provider-swap
+// demo, #17) is only the per-session *default* now, resolved through
+// ITranslationProviderSelector when session.start doesn't pick one. Typed HttpClient
+// either way, same pattern as IRealtimeSessionClient above - API keys are attached
+// per-request inside each provider. An unrecognized default still fails startup
+// rather than silently falling back, so a config typo can't quietly run the wrong
+// provider.
 var translationProvider = builder.Configuration["TRANSLATION_PROVIDER"]?.ToLowerInvariant() ?? "openai";
-switch (translationProvider)
+if (!StageModels.IsSupportedMtProvider(translationProvider))
 {
-    case "openai":
-        builder.Services.AddHttpClient<ITranslationProvider, OpenAiTranslationProvider>(client =>
-        {
-            client.BaseAddress = new Uri("https://api.openai.com/v1/");
-            client.Timeout = TimeSpan.FromSeconds(30);
-        });
-        break;
-
-    case "anthropic":
-        builder.Services.AddHttpClient<ITranslationProvider, AnthropicTranslationProvider>(client =>
-        {
-            client.BaseAddress = new Uri("https://api.anthropic.com/v1/");
-            client.Timeout = TimeSpan.FromSeconds(30);
-        });
-        break;
-
-    default:
-        throw new InvalidOperationException(
-            $"Unrecognized TRANSLATION_PROVIDER '{translationProvider}'. Valid values: openai, anthropic.");
+    throw new InvalidOperationException(
+        $"Unrecognized TRANSLATION_PROVIDER '{translationProvider}'. Valid values: openai, anthropic.");
 }
+
+builder.Services.AddHttpClient<OpenAiTranslationProvider>(client =>
+{
+    client.BaseAddress = new Uri("https://api.openai.com/v1/");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+builder.Services.AddHttpClient<AnthropicTranslationProvider>(client =>
+{
+    client.BaseAddress = new Uri("https://api.anthropic.com/v1/");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+builder.Services.AddScoped<ITranslationProviderSelector, TranslationProviderSelector>();
 
 // Session-metrics persistence (#10 revisited; docs/tech-stack.md's amended entry):
 // local SQLite file, path overridable via METRICS_DB_PATH so tests and deployments

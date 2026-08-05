@@ -1,4 +1,4 @@
-import type { LanguagePair } from '../api';
+import type { CascadeStageModels, LanguagePair } from '../api';
 import { AudioPlaybackQueue } from '../cascade/AudioPlaybackQueue';
 import { CascadeSessionController } from '../cascade/CascadeSessionController';
 import { mapCascadeEventToTranscriptUpdate } from '../cascade/cascadeTranscriptAdapter';
@@ -94,6 +94,10 @@ export class CascadeInterpreterSession implements InterpreterSession {
     return this.controller.subscribeToNotice((notice) => {
       listener({ id: `${this.mode}:notice:${++this.noticeSeq}`, message: notice.message });
     });
+  }
+
+  setStageModels(models: CascadeStageModels): void {
+    this.controller.setStageModels(models);
   }
 
   start(pair: LanguagePair): Promise<void> {

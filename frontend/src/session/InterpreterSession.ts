@@ -1,4 +1,4 @@
-import type { LanguagePair } from '../api';
+import type { CascadeStageModels, LanguagePair } from '../api';
 import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
 import { INITIAL_SESSION_STATE, type SessionErrorKind, type SessionState, type SessionStatus } from './sessionState';
@@ -87,6 +87,13 @@ export interface InterpreterSession {
    * function.
    */
   subscribeToNotice?(listener: NoticeListener): Unsubscribe;
+  /**
+   * Applies the per-stage model picks the next `start()` negotiates (Lab P1).
+   * Optional because only cascade has stages to pick; Realtime omits it and
+   * the hook simply skips the call — mirroring {@link subscribeToNotice}'s
+   * optionality pattern.
+   */
+  setStageModels?(models: CascadeStageModels): void;
   /** Requests mic access and opens the session for the given language pair. A no-op while already live; call `stop()` first to retry from `'error'`. */
   start(pair: LanguagePair): Promise<void>;
   /** Tears the session down cleanly (safe to call from any state, including already idle). */

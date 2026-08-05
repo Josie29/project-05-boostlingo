@@ -103,7 +103,7 @@ public sealed class OpenAiSttProvider(
             new OpenAiTranscriptionAudioConfig(
                 new OpenAiTranscriptionAudioInputConfig(
                     Format: new OpenAiAudioFormatConfig(CascadeAudioFormat.SampleRateHz),
-                    Transcription: new OpenAiInputAudioTranscriptionConfig(Model, config.SourceLang),
+                    Transcription: new OpenAiInputAudioTranscriptionConfig(config.Model ?? Model, config.SourceLang),
                     TurnDetection: new OpenAiTurnDetectionConfig(VadType)))));
 
     /// <summary>

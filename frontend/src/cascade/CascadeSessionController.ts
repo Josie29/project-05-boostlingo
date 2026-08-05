@@ -1,6 +1,6 @@
 import type { CascadeAudioCapture } from './CascadeAudioCapture';
 import { MicPcmCapture } from './MicPcmCapture';
-import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
+import { DEFAULT_LANGUAGE_PAIR, type CascadeStageModels, type LanguagePair } from '../api';
 import { ListenerSet } from '../session/listenerSet';
 import { runSessionStart } from '../session/sessionStart';
 import {
@@ -132,6 +132,8 @@ export class CascadeSessionController {
   private state: CascadeSessionState = INITIAL_CASCADE_SESSION_STATE;
   private localStream: MediaStream | null = null;
   private socket: WebSocket | null = null;
+  /** Stage model picks for the next `session.start` (Lab P1); empty means backend defaults. Survives stop()/start() — a pick outlives one conversation. */
+  private stageModels: CascadeStageModels = {};
   private audioCapture: CascadeAudioCapture | null = null;
   /**
    * Set while inside a `tts.audio.start`/`tts.audio.end` window, to the
@@ -220,6 +222,11 @@ export class CascadeSessionController {
    *   Defaults to {@link DEFAULT_LANGUAGE_PAIR} (en -> es) when omitted,
    *   matching the backend's own default.
    */
+  /** Sets the per-stage model picks the next `session.start` sends (Lab P1). */
+  setStageModels(models: CascadeStageModels): void {
+    this.stageModels = models;
+  }
+
   async start(pair: LanguagePair = DEFAULT_LANGUAGE_PAIR): Promise<void> {
     await runSessionStart({
       status: this.state.status,
@@ -284,7 +291,14 @@ export class CascadeSessionController {
           JSON.stringify({
             v: CASCADE_ENVELOPE_VERSION,
             type: CascadeMessageType.SessionStart,
-            payload: { sourceLang: pair.sourceLang, targetLang: pair.targetLang },
+            payload: {
+              sourceLang: pair.sourceLang,
+              targetLang: pair.targetLang,
+              // Stage picks ride along only when made; omitted keys mean the
+              // backend defaults, keeping pre-Lab clients and tests byte-identical.
+              ...(this.stageModels.sttModel ? { sttModel: this.stageModels.sttModel } : {}),
+              ...(this.stageModels.mtProvider ? { mtProvider: this.stageModels.mtProvider } : {}),
+            },
           }),
         );
       };

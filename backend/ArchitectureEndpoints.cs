@@ -33,7 +33,8 @@ public static class ArchitectureEndpoints
                 Stt: new StageModelInfo(OpenAiSttProvider.Model),
                 Mt: anthropicActive ? anthropic : openAi,
                 MtAlternative: anthropicActive ? openAi : anthropic,
-                Tts: new StageModelInfo(OpenAiTtsProvider.Model))));
+                Tts: new StageModelInfo(OpenAiTtsProvider.Model),
+                SttOptions: StageModels.SttModels)));
     }
 }
 
@@ -52,8 +53,9 @@ public sealed record RealtimeArchitectureInfo(string Model);
 /// <param name="MtAlternative">The other MT provider — surfaced so the UI can show the swap that
 /// selecting it would produce (the brief's provider-flexibility demo).</param>
 /// <param name="Tts">Text-to-speech stage.</param>
+/// <param name="SttOptions">Every STT model a session may select (Lab P1); the first is the default.</param>
 public sealed record CascadeArchitectureInfo(
-    StageModelInfo Stt, MtStageInfo Mt, MtStageInfo MtAlternative, StageModelInfo Tts);
+    StageModelInfo Stt, MtStageInfo Mt, MtStageInfo MtAlternative, StageModelInfo Tts, IReadOnlyList<string> SttOptions);
 
 /// <summary>A pipeline stage with no provider choice: just its model id.</summary>
 /// <param name="Model">The model id.</param>

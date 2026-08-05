@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react';
 import { BackendStatus } from './components/BackendStatus';
+import { LabPanel } from './components/LabPanel';
 import { LanguagePairSelector } from './components/LanguagePairSelector';
 import { SessionPanel } from './components/SessionPanel';
 import { isLiveStatus } from './session/InterpreterSession';
 import { useInterpreterSession } from './session/useInterpreterSession';
-import { DEFAULT_LANGUAGE_PAIR, getArchitecture, type ArchitectureInfo, type LanguagePair } from './api';
+import {
+  DEFAULT_LANGUAGE_PAIR,
+  getArchitecture,
+  type ArchitectureInfo,
+  type CascadeStageModels,
+  type LanguagePair,
+} from './api';
 import './App.css';
 
 /**
@@ -18,7 +25,9 @@ import './App.css';
 function App() {
   const [pair, setPair] = useState<LanguagePair>(DEFAULT_LANGUAGE_PAIR);
   const [architecture, setArchitecture] = useState<ArchitectureInfo | null>(null);
-  const session = useInterpreterSession(pair);
+  const [stageModels, setStageModels] = useState<CascadeStageModels>({});
+  const [view, setView] = useState<'live' | 'lab'>('live');
+  const session = useInterpreterSession(pair, undefined, stageModels);
   const isActive = isLiveStatus(session.status) || session.switching;
 
   // Model names for the architecture cards. Static per backend process, so
@@ -45,10 +54,31 @@ function App() {
       </header>
 
       <main className="app-shell__main">
-        <BackendStatus />
+        <div className="app-shell__topbar">
+          <BackendStatus />
+          <nav className="app-shell__views" aria-label="View">
+            {(['live', 'lab'] as const).map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                className="app-shell__view-tab"
+                aria-pressed={view === candidate}
+                onClick={() => setView(candidate)}
+              >
+                {candidate === 'live' ? 'Live' : 'Lab'}
+              </button>
+            ))}
+          </nav>
+        </div>
+        {/* The live panel stays mounted while Lab is open: the session hook lives
+            above both views, so switching views never touches a running session. */}
+        <div hidden={view !== 'live'}>
         <SessionPanel
           architecture={architecture}
           pairSelector={<LanguagePairSelector pair={pair} onChange={setPair} disabled={isActive} />}
+          stageModels={stageModels}
+          onStageModelsChange={setStageModels}
+          stageModelsLocked={isActive}
           mode={session.mode}
           status={session.status}
           errorMessage={session.errorMessage}
@@ -65,6 +95,8 @@ function App() {
           onReconnect={session.reconnect}
           onDismissNotice={session.dismissNotice}
         />
+        </div>
+        {view === 'lab' && <LabPanel />}
       </main>
     </div>
   );

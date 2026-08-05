@@ -187,6 +187,29 @@ describe('CascadeSessionController', () => {
     );
   });
 
+  // Catches a stage pick (Lab P1) silently not reaching the backend: models set
+  // before start must ride in session.start; a session with no picks must send a
+  // payload byte-identical to the pre-Lab shape (defaults stay implicit).
+  it('sends stage model picks in session.start only when they were made', async () => {
+    const ws = fakeWebSocket();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)) });
+    const controller = new CascadeSessionController(deps);
+    controller.setStageModels({ sttModel: 'gpt-4o-transcribe', mtProvider: 'anthropic' });
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    completeHandshake(ws);
+    await startPromise;
+
+    expect(ws.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        v: 1,
+        type: 'session.start',
+        payload: { sourceLang: 'en', targetLang: 'es', sttModel: 'gpt-4o-transcribe', mtProvider: 'anthropic' },
+      }),
+    );
+  });
+
   // Catches the bug this issue is centrally about: streaming audio before the
   // server has acknowledged the format it expects (`session.ready`). Sending
   // early risks the backend rejecting or misinterpreting frames it hasn't

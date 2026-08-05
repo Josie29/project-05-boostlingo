@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import type { ArchitectureInfo } from '../api';
+import type { ArchitectureInfo, CascadeStageModels } from '../api';
 import type { LatencyReport, LatencySessionAverages } from '../latency/types';
 import type { SessionErrorKind, SessionMode, SessionNotice, SessionStatus } from '../session/InterpreterSession';
 import type { TranscriptEntry } from '../transcript/types';
@@ -77,6 +77,12 @@ export interface SessionPanelProps {
   architecture: ArchitectureInfo | null;
   /** The language pair selector, rendered inside this panel's toolbar so session setup reads as one row. */
   pairSelector?: ReactNode;
+  /** The cascade card's current stage picks (Lab P1); empty means defaults. */
+  stageModels: CascadeStageModels;
+  /** Called when a stage pick changes; disabled (like the language pair) while a session is live. */
+  onStageModelsChange: (models: CascadeStageModels) => void;
+  /** True while picks are locked: a live session already negotiated its models. */
+  stageModelsLocked: boolean;
 }
 
 /**
@@ -109,6 +115,9 @@ export function SessionPanel({
   onDismissNotice,
   architecture,
   pairSelector,
+  stageModels,
+  onStageModelsChange,
+  stageModelsLocked,
 }: SessionPanelProps) {
   const isBusy = status === 'requesting-mic' || status === 'connecting';
   const isConnected = status === 'connected';
@@ -141,6 +150,9 @@ export function SessionPanel({
             disabled={switching}
             architecture={architecture}
             onSelect={() => onModeChange(candidate)}
+            stageModels={stageModels}
+            onStageModelsChange={onStageModelsChange}
+            stageModelsLocked={stageModelsLocked}
           />
         ))}
       </div>
@@ -205,12 +217,18 @@ function ModeCard({
   disabled,
   architecture,
   onSelect,
+  stageModels,
+  onStageModelsChange,
+  stageModelsLocked,
 }: {
   mode: SessionMode;
   selected: boolean;
   disabled: boolean;
   architecture: ArchitectureInfo | null;
   onSelect: () => void;
+  stageModels: CascadeStageModels;
+  onStageModelsChange: (models: CascadeStageModels) => void;
+  stageModelsLocked: boolean;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
 
@@ -230,7 +248,9 @@ function ModeCard({
       tabIndex={0}
       onClick={select}
       onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
+        // Only the card itself — a key pressed inside a nested control (the
+        // Details button, a stage select) must not also switch the mode.
+        if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
           select();
         }
@@ -257,20 +277,61 @@ function ModeCard({
         <p className="session-panel__stage-row">
           <code>{architecture?.realtime.model ?? '…'}</code>
         </p>
-      ) : (
+      ) : architecture === null ? (
         <>
           <p className="session-panel__stage-row">
             <span className="session-panel__stage-name">STT</span>
-            <code>{architecture?.cascade.stt.model ?? '…'}</code>
+            <code>…</code>
           </p>
           <p className="session-panel__stage-row">
             <span className="session-panel__stage-name">MT</span>
-            <code>{architecture?.cascade.mt.model ?? '…'}</code>
-            {architecture && <span className="session-panel__provider-badge">{architecture.cascade.mt.provider}</span>}
+            <code>…</code>
           </p>
           <p className="session-panel__stage-row">
             <span className="session-panel__stage-name">TTS</span>
-            <code>{architecture?.cascade.tts.model ?? '…'}</code>
+            <code>…</code>
+          </p>
+        </>
+      ) : (
+        <>
+          <div className="session-panel__stage-row">
+            <span className="session-panel__stage-name">STT</span>
+            <select
+              className="session-panel__stage-select"
+              aria-label="STT model"
+              disabled={stageModelsLocked}
+              value={stageModels.sttModel ?? (architecture.cascade.sttOptions ?? [architecture.cascade.stt.model])[0]}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => onStageModelsChange({ ...stageModels, sttModel: event.target.value })}
+            >
+              {/* Fallback for a backend predating sttOptions — a stale-backend window must degrade to the default, not crash the card. */}
+              {(architecture.cascade.sttOptions ?? [architecture.cascade.stt.model]).map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="session-panel__stage-row">
+            <span className="session-panel__stage-name">MT</span>
+            <select
+              className="session-panel__stage-select"
+              aria-label="MT provider"
+              disabled={stageModelsLocked}
+              value={stageModels.mtProvider ?? architecture.cascade.mt.provider}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => onStageModelsChange({ ...stageModels, mtProvider: event.target.value })}
+            >
+              {[architecture.cascade.mt, architecture.cascade.mtAlternative].map(({ provider, model }) => (
+                <option key={provider} value={provider}>
+                  {model} · {provider}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="session-panel__stage-row">
+            <span className="session-panel__stage-name">TTS</span>
+            <code>{architecture.cascade.tts.model}</code>
           </p>
         </>
       )}

@@ -37,6 +37,38 @@ public interface ITranslationProvider
 }
 
 /// <summary>
+/// Resolves which <see cref="ITranslationProvider"/> a cascade session runs on (Lab
+/// P1): both providers stay registered, and the choice moves from process startup to
+/// <c>session.start</c>. <c>null</c> resolves the <c>TRANSLATION_PROVIDER</c> default,
+/// so a client that never picks gets exactly the pre-P1 behavior.
+/// </summary>
+public interface ITranslationProviderSelector
+{
+    /// <summary>Resolves a validated provider name (or <c>null</c> for the process default) to its provider.</summary>
+    /// <param name="providerName">One of <see cref="StageModels.MtProviders"/>, or <c>null</c>.</param>
+    ITranslationProvider Resolve(string? providerName);
+}
+
+/// <summary>
+/// DI-backed <see cref="ITranslationProviderSelector"/>. Resolves lazily per call so
+/// only the provider a session actually uses gets constructed.
+/// </summary>
+public sealed class TranslationProviderSelector(IServiceProvider services, TranslationProviderName defaultProvider)
+    : ITranslationProviderSelector
+{
+    /// <inheritdoc />
+    /// <exception cref="InvalidOperationException">The name is neither known provider —
+    /// unreachable for session-negotiated values (CascadeSession validates against
+    /// <see cref="StageModels.MtProviders"/> first), so this guards config/code drift.</exception>
+    public ITranslationProvider Resolve(string? providerName) => (providerName ?? defaultProvider.Value) switch
+    {
+        "openai" => services.GetRequiredService<OpenAiTranslationProvider>(),
+        "anthropic" => services.GetRequiredService<AnthropicTranslationProvider>(),
+        var unknown => throw new InvalidOperationException($"Unknown MT provider '{unknown}'."),
+    };
+}
+
+/// <summary>
 /// One chunk of a streaming translation of a single finalized source utterance -
 /// either a token delta (<c>IsFinal: false</c>) or the completed translation in full
 /// (<c>IsFinal: true</c>), mirroring the partial/final split <see cref="SttSegment"/>

@@ -73,7 +73,9 @@ public sealed record SttSegment(
 /// <summary>Per-session configuration an <see cref="ISttProvider"/> needs to start a stream.</summary>
 /// <param name="SourceLang">Language tag the speaker is using, e.g. <c>"en"</c>. Providers that
 /// support a language hint should use it to improve recognition accuracy.</param>
-public sealed record SttStreamConfig(string SourceLang);
+/// <param name="Model">Session-negotiated STT model (one of <see cref="StageModels.SttModels"/>,
+/// already validated), or <c>null</c> for the provider's default.</param>
+public sealed record SttStreamConfig(string SourceLang, string? Model = null);
 
 /// <summary>
 /// One open speech-to-text stream for the lifetime of a cascade session. Callers push

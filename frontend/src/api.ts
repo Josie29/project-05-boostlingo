@@ -156,6 +156,41 @@ export interface ConversationMetricsPayload {
   endedAtMs: number;
   utterances: UtteranceMetricsPayload[];
   transcript: TranscriptEntryPayload[];
+  /** The session's STT model pick, omitted for the default (backend stamps what ran). */
+  sttModel?: string;
+  /** The session's MT provider pick, omitted for the default. */
+  mtProvider?: string;
+}
+
+/** One stored conversation, as returned by `GET /api/metrics/conversations` — a Lab table row. */
+export interface ConversationListing {
+  conversationId: string;
+  sourceLang: string;
+  targetLang: string;
+  translationProvider: string;
+  startedAtMs: number;
+  endedAtMs: number;
+  realtimeUtteranceCount: number;
+  cascadeUtteranceCount: number;
+  sttModel: string;
+  kind: string;
+  wer: number | null;
+  realtimeEndToEndMedianMs: number | null;
+  cascadeEndToEndMedianMs: number | null;
+}
+
+/**
+ * Fetches every stored conversation, most recently started first.
+ *
+ * @returns Lab table rows: per-conversation config and per-mode medians.
+ * @throws {Error} If the network request fails or the response is not ok.
+ */
+export async function getConversations(): Promise<ConversationListing[]> {
+  const response = await fetch('/api/metrics/conversations');
+  if (!response.ok) {
+    throw new Error(`Failed to fetch conversations (status ${response.status})`);
+  }
+  return ((await response.json()) as { conversations: ConversationListing[] }).conversations;
 }
 
 /**
@@ -200,7 +235,19 @@ export interface ArchitectureInfo {
     /** The other MT provider — what selecting it would run (the provider-swap demo). */
     mtAlternative: MtStageInfo;
     tts: { model: string };
+    /** Every STT model a session may select (Lab P1); the first is the default. */
+    sttOptions: string[];
   };
+}
+
+/**
+ * A session's per-stage model picks (Lab P1). Omitted fields mean the
+ * backend defaults — sent in cascade `session.start` and stamped into the
+ * conversation's persisted metrics so Lab rows group by what actually ran.
+ */
+export interface CascadeStageModels {
+  sttModel?: string;
+  mtProvider?: string;
 }
 
 /**

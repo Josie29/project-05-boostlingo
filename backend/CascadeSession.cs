@@ -426,6 +426,23 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
             return;
         }
 
+        // Stage model choices (Lab P1) validate against the same single-registry
+        // pattern the language pair does; a typo fails the start rather than silently
+        // running (and stamping metrics with) a different model than requested.
+        if (start.SttModel is not null && !StageModels.IsSupportedSttModel(start.SttModel))
+        {
+            await TrySendErrorAsync(
+                $"Unsupported STT model '{start.SttModel}'.", CascadeErrorStages.Session, recoverable: true, cancellationToken);
+            return;
+        }
+
+        if (start.MtProvider is not null && !StageModels.IsSupportedMtProvider(start.MtProvider))
+        {
+            await TrySendErrorAsync(
+                $"Unsupported MT provider '{start.MtProvider}'.", CascadeErrorStages.Session, recoverable: true, cancellationToken);
+            return;
+        }
+
         logger.LogInformation(
             "Cascade session {SessionId} started: {SourceLang} -> {TargetLang}.",
             _sessionId,
@@ -433,7 +450,10 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
             start.TargetLang);
 
         _started = true;
-        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig(start.SourceLang, start.TargetLang), this, cancellationToken);
+        await pipeline.OnSessionStartedAsync(
+            new CascadeSessionConfig(start.SourceLang, start.TargetLang, start.SttModel, start.MtProvider),
+            this,
+            cancellationToken);
 
         await SendEventAsync(
             CascadeMessageTypes.SessionReady,

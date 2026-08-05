@@ -226,7 +226,7 @@ public class CascadeBargeInTests
 
     private static CascadePipeline CreatePipeline(
         ISttProvider provider, ITranslationProvider translationProvider, IEnumerable<ITranslationObserver> translationObservers) =>
-        new(provider, translationProvider, translationObservers, NullLogger<CascadePipeline>.Instance);
+        new(provider, new FixedTranslationProviderSelector(translationProvider), translationObservers, NullLogger<CascadePipeline>.Instance);
 
     private static CancellationToken TestTimeout() => new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token;
 }

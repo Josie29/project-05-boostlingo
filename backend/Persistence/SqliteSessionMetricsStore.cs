@@ -40,9 +40,47 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
 
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = Schema;
-        command.ExecuteNonQuery();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = Schema;
+            command.ExecuteNonQuery();
+        }
+
+        MigrateConversationColumns(connection);
+    }
+
+    /// <summary>
+    /// Adds columns the Lab work introduced (stt_model, kind, wer, fixture) to a
+    /// database created before them. CREATE IF NOT EXISTS alone would silently leave
+    /// an existing dev database on the old shape — and dropping it would discard
+    /// captured benchmark sessions, which are exactly the data worth keeping.
+    /// </summary>
+    private static void MigrateConversationColumns(SqliteConnection connection)
+    {
+        var existing = new HashSet<string>();
+        using (var query = connection.CreateCommand())
+        {
+            query.CommandText = "PRAGMA table_info(conversations)";
+            using var reader = query.ExecuteReader();
+            while (reader.Read())
+            {
+                existing.Add(reader.GetString(1)); // Column 1 is the column name.
+            }
+        }
+
+        (string Name, string Definition)[] added =
+        [
+            ("stt_model", $"TEXT NOT NULL DEFAULT '{OpenAiSttProvider.Model}'"),
+            ("kind", "TEXT NOT NULL DEFAULT 'live'"),
+            ("wer", "REAL NULL"),
+            ("fixture", "TEXT NULL"),
+        ];
+        foreach (var (name, definition) in added.Where(column => !existing.Contains(column.Name)))
+        {
+            using var alter = connection.CreateCommand();
+            alter.CommandText = $"ALTER TABLE conversations ADD COLUMN {name} {definition}";
+            alter.ExecuteNonQuery();
+        }
     }
 
     /// <summary>
@@ -60,7 +98,11 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             target_lang TEXT NOT NULL,
             translation_provider TEXT NOT NULL,
             started_at_ms INTEGER NOT NULL,
-            ended_at_ms INTEGER NOT NULL
+            ended_at_ms INTEGER NOT NULL,
+            stt_model TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
+            kind TEXT NOT NULL DEFAULT 'live',
+            wer REAL NULL,
+            fixture TEXT NULL
         );
 
         CREATE TABLE IF NOT EXISTS utterances (
@@ -94,7 +136,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
 
     /// <inheritdoc />
     public async Task SaveConversationAsync(
-        ConversationMetricsReport report, string translationProvider, CancellationToken cancellationToken)
+        ConversationMetricsReport report, string translationProvider, string sttModel, CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -114,8 +156,8 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         {
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms)
-                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs)
+                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, kind)
+                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, 'live')
                 """;
             insert.Parameters.AddWithValue("$id", report.ConversationId);
             insert.Parameters.AddWithValue("$sourceLang", report.SourceLang);
@@ -123,6 +165,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             insert.Parameters.AddWithValue("$translationProvider", translationProvider);
             insert.Parameters.AddWithValue("$startedAtMs", report.StartedAtMs);
             insert.Parameters.AddWithValue("$endedAtMs", report.EndedAtMs);
+            insert.Parameters.AddWithValue("$sttModel", sttModel);
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -183,12 +226,35 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
+
+        // Per-conversation, per-mode end-to-end populations for the median columns
+        // (SQLite has no median; computed in C# like GetSummaryAsync's stats).
+        var endToEnd = new Dictionary<(string ConversationId, string Mode), List<double>>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                "SELECT conversation_id, mode, end_to_end_ms FROM utterances WHERE end_to_end_ms IS NOT NULL";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var key = (reader.GetString(0), reader.GetString(1));
+                if (!endToEnd.TryGetValue(key, out var values))
+                {
+                    values = [];
+                    endToEnd[key] = values;
+                }
+
+                values.Add(reader.GetDouble(2));
+            }
+        }
+
+        await using var listCommand = connection.CreateCommand();
+        listCommand.CommandText = """
             SELECT
                 c.id, c.source_lang, c.target_lang, c.translation_provider, c.started_at_ms, c.ended_at_ms,
                 COUNT(CASE WHEN u.mode = 'realtime' THEN 1 END) AS realtime_count,
-                COUNT(CASE WHEN u.mode = 'cascade' THEN 1 END) AS cascade_count
+                COUNT(CASE WHEN u.mode = 'cascade' THEN 1 END) AS cascade_count,
+                c.stt_model, c.kind, c.wer
             FROM conversations c
             LEFT JOIN utterances u ON u.conversation_id = c.id
             GROUP BY c.id
@@ -196,22 +262,32 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             """;
 
         var listings = new List<ConversationListing>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await using var listReader = await listCommand.ExecuteReaderAsync(cancellationToken);
+        while (await listReader.ReadAsync(cancellationToken))
         {
+            var conversationId = listReader.GetString(0);
             listings.Add(new ConversationListing(
-                ConversationId: reader.GetString(0),
-                SourceLang: reader.GetString(1),
-                TargetLang: reader.GetString(2),
-                TranslationProvider: reader.GetString(3),
-                StartedAtMs: reader.GetInt64(4),
-                EndedAtMs: reader.GetInt64(5),
-                RealtimeUtteranceCount: reader.GetInt32(6),
-                CascadeUtteranceCount: reader.GetInt32(7)));
+                ConversationId: conversationId,
+                SourceLang: listReader.GetString(1),
+                TargetLang: listReader.GetString(2),
+                TranslationProvider: listReader.GetString(3),
+                StartedAtMs: listReader.GetInt64(4),
+                EndedAtMs: listReader.GetInt64(5),
+                RealtimeUtteranceCount: listReader.GetInt32(6),
+                CascadeUtteranceCount: listReader.GetInt32(7),
+                SttModel: listReader.GetString(8),
+                Kind: listReader.GetString(9),
+                Wer: listReader.IsDBNull(10) ? null : listReader.GetDouble(10),
+                RealtimeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "realtime"),
+                CascadeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "cascade")));
         }
 
         return listings;
     }
+
+    private static double? MedianOrNull(
+        Dictionary<(string, string), List<double>> populations, string conversationId, string mode) =>
+        populations.TryGetValue((conversationId, mode), out var values) ? Median(values.Order().ToList()) : null;
 
     /// <inheritdoc />
     public async Task<MetricsSummary> GetSummaryAsync(CancellationToken cancellationToken)
@@ -330,15 +406,18 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         }
 
         var sorted = values.Order().ToList();
-        var middle = sorted.Count / 2; // Upper-middle index; exact middle when count is odd.
-        var median = sorted.Count % 2 == 1
-            ? sorted[middle]
-            : (sorted[middle - 1] + sorted[middle]) / 2.0;
 
         // Nearest-rank: the smallest observed value with at least 95% of the sample at or below it.
         var rank = (int)Math.Ceiling(0.95 * sorted.Count);
         var p95 = sorted[Math.Clamp(rank - 1, 0, sorted.Count - 1)];
 
-        return new LatencyStats(sorted.Count, median, p95);
+        return new LatencyStats(sorted.Count, Median(sorted), p95);
+    }
+
+    /// <summary>Median of an already-sorted, non-empty population; interpolates the middle pair on even counts.</summary>
+    private static double Median(List<double> sorted)
+    {
+        var middle = sorted.Count / 2; // Upper-middle index; exact middle when count is odd.
+        return sorted.Count % 2 == 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2.0;
     }
 }

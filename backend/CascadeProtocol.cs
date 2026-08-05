@@ -236,7 +236,10 @@ public static class CascadeLatencyMarks
 /// <summary>Payload for <see cref="CascadeMessageTypes.SessionStart"/>.</summary>
 /// <param name="SourceLang">BCP-47-ish language tag the speaker is using, e.g. <c>"en"</c>.</param>
 /// <param name="TargetLang">Language tag to interpret into, e.g. <c>"es"</c>.</param>
-public sealed record CascadeSessionStartPayload(string SourceLang, string TargetLang);
+/// <param name="SttModel">STT model to run this session on (one of <see cref="StageModels.SttModels"/>), or omitted for the default.</param>
+/// <param name="MtProvider">MT provider to run this session on (one of <see cref="StageModels.MtProviders"/>), or omitted for the <c>TRANSLATION_PROVIDER</c> default.</param>
+public sealed record CascadeSessionStartPayload(
+    string SourceLang, string TargetLang, string? SttModel = null, string? MtProvider = null);
 
 /// <summary>Payload for <see cref="CascadeMessageTypes.SessionReady"/>.</summary>
 /// <param name="SampleRateHz">Required upstream PCM sample rate; see <see cref="CascadeAudioFormat"/>.</param>
@@ -411,4 +414,7 @@ public sealed record CascadeBargeInPayload(IReadOnlyCollection<string> Supersede
 /// <summary>The negotiated configuration for one cascade session, taken from <see cref="CascadeSessionStartPayload"/>.</summary>
 /// <param name="SourceLang">Language tag the speaker is using.</param>
 /// <param name="TargetLang">Language tag to interpret into.</param>
-public sealed record CascadeSessionConfig(string SourceLang, string TargetLang);
+/// <param name="SttModel">Validated session STT model choice, or <c>null</c> for the provider default.</param>
+/// <param name="MtProvider">Validated session MT provider choice, or <c>null</c> for the process default.</param>
+public sealed record CascadeSessionConfig(
+    string SourceLang, string TargetLang, string? SttModel = null, string? MtProvider = null);

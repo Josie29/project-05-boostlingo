@@ -602,7 +602,7 @@ public class CascadePipelineTests
         IEnumerable<ITranslationObserver>? translationObservers = null) =>
         new(
             provider,
-            translationProvider ?? new FakeTranslationProvider(_ => Tokens()),
+            new FixedTranslationProviderSelector(translationProvider ?? new FakeTranslationProvider(_ => Tokens())),
             translationObservers ?? [],
             NullLogger<CascadePipeline>.Instance);
 

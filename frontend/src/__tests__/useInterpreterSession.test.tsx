@@ -514,6 +514,23 @@ describe('useInterpreterSession', () => {
     ]);
   });
 
+  // Catches the Lab table grouping runs under the wrong config: stage picks must be
+  // stamped into the metrics post so stored rows name what actually ran.
+  it('includes the cascade stage picks in the metrics post', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }, { mtProvider: 'anthropic' }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitLatency({ utteranceId: 'realtime:turn-1', stages: [], endToEndMs: 1_000 }));
+    act(() => result.current.stop());
+
+    expect(postedMetricsBody().mtProvider).toBe('anthropic');
+  });
+
   // Catches empty junk rows accumulating in the metrics store: a Stop with nothing
   // captured (pressed before any utterance, or a second press after teardown) must
   // not post at all.

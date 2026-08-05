@@ -112,6 +112,52 @@ public class CascadeAudioSessionTests
     }
 
     /// <summary>
+    /// Catches a session's model picks silently not taking effect (Lab P1): a
+    /// session.start carrying stage choices must hand them to the pipeline, and
+    /// omitting them must resolve to null (the defaults) — not empty strings.
+    /// </summary>
+    [Fact]
+    public async Task SessionStart_WithStageModels_PassesThemToThePipeline()
+    {
+        var fakePipeline = new FakeCascadePipeline();
+        using var factory = new CascadeTestFactory(fakePipeline);
+        using var socket = await ConnectAsync(factory.Server);
+
+        await SendTextAsync(
+            socket,
+            """{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"es","sttModel":"gpt-4o-transcribe","mtProvider":"anthropic"}}""");
+        await ReceiveEnvelopeAsync(socket);
+
+        Assert.Equal("gpt-4o-transcribe", fakePipeline.StartedConfig?.SttModel);
+        Assert.Equal("anthropic", fakePipeline.StartedConfig?.MtProvider);
+
+        await CloseAsync(socket);
+    }
+
+    /// <summary>
+    /// Catches a typo'd model pick silently running (and stamping metrics as) the
+    /// wrong model: unknown stage choices must fail the start like an unsupported
+    /// language pair does.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"es","sttModel":"whisper-1"}}""")]
+    [InlineData("""{"v":1,"type":"session.start","payload":{"sourceLang":"en","targetLang":"es","mtProvider":"deepl"}}""")]
+    public async Task SessionStart_UnsupportedStageChoice_ReceivesErrorEvent_AndNeverStartsPipeline(string startMessage)
+    {
+        var fakePipeline = new FakeCascadePipeline();
+        using var factory = new CascadeTestFactory(fakePipeline);
+        using var socket = await ConnectAsync(factory.Server);
+
+        await SendTextAsync(socket, startMessage);
+        var envelope = await ReceiveEnvelopeAsync(socket);
+
+        Assert.Equal("error", envelope.RootElement.GetProperty("type").GetString());
+        Assert.Null(fakePipeline.StartedConfig);
+
+        await CloseAsync(socket);
+    }
+
+    /// <summary>
     /// Confirms a second session.start on the same connection is rejected with a
     /// recoverable error and never reaches the pipeline a second time - without this
     /// guard, a repeat session.start would open a second STT (speech-to-text) stream

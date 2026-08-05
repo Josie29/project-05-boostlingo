@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
-import { reportConversationMetrics, type ConversationMetricsPayload, type LanguagePair } from '../api';
+import {
+  reportConversationMetrics,
+  type CascadeStageModels,
+  type ConversationMetricsPayload,
+  type LanguagePair,
+} from '../api';
 import { latencyReducer, selectLatencyAverages, selectRecentReports } from '../latency/latencyReducer';
 import { INITIAL_LATENCY_STATE, type LatencyReport, type LatencySessionAverages, type LatencyState } from '../latency/types';
 import { transcriptReducer } from '../transcript/transcriptReducer';
@@ -125,6 +130,7 @@ function defaultSessions(): Record<SessionMode, InterpreterSession> {
 export function useInterpreterSession(
   pair: LanguagePair,
   sessions?: Record<SessionMode, InterpreterSession>,
+  cascadeModels?: CascadeStageModels,
 ): UseInterpreterSessionResult {
   const sessionsRef = useRef<Record<SessionMode, InterpreterSession> | null>(null);
   sessionsRef.current ??= sessions ?? defaultSessions();
@@ -134,6 +140,13 @@ export function useInterpreterSession(
   const [switching, setSwitching] = useState(false);
   const pairRef = useRef(pair);
   pairRef.current = pair;
+  const cascadeModelsRef = useRef(cascadeModels);
+  cascadeModelsRef.current = cascadeModels;
+
+  /** Pushes the current stage picks into a session that takes them (cascade), right before any start. */
+  function applyStageModels(session: InterpreterSession): void {
+    session.setStageModels?.(cascadeModelsRef.current ?? {});
+  }
 
   const activeSession = activeSessions[mode];
 
@@ -173,12 +186,15 @@ export function useInterpreterSession(
       return;
     }
 
+    const models = cascadeModelsRef.current ?? {};
     const payload: ConversationMetricsPayload = {
       conversationId: conversation.id,
       sourceLang: conversation.pair.sourceLang,
       targetLang: conversation.pair.targetLang,
       startedAtMs: conversation.startedAtMs,
       endedAtMs: Date.now(),
+      ...(models.sttModel ? { sttModel: models.sttModel } : {}),
+      ...(models.mtProvider ? { mtProvider: models.mtProvider } : {}),
       utterances: latencyState.reports.map((report) => ({
         utteranceId: report.utteranceId,
         mode: modeOfPrefixedId(report.utteranceId),
@@ -244,6 +260,7 @@ export function useInterpreterSession(
     current.stop();
     setModeState(nextMode);
     const next = activeSessions[nextMode];
+    applyStageModels(next);
     void next.start(pairRef.current).finally(() => setSwitching(false));
   }
 
@@ -278,6 +295,7 @@ export function useInterpreterSession(
       dispatchTranscript({ kind: 'reset' });
       dispatchLatency({ kind: 'reset' });
       setNotice(null);
+      applyStageModels(activeSession);
       void activeSession.start(pair);
     },
     // Stop is the persistence point (issue #10 revisited): the user deliberately
@@ -296,6 +314,7 @@ export function useInterpreterSession(
     reconnect: () => {
       activeSession.stop();
       setNotice(null);
+      applyStageModels(activeSession);
       void activeSession.start(pairRef.current);
     },
     dismissNotice: () => setNotice(null),

@@ -42,7 +42,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task SavedConversation_IsListedWithProviderAndPerModeCounts()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport(), "openai", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
 
         var listings = await store.ListConversationsAsync(CancellationToken.None);
 
@@ -53,6 +53,64 @@ public class SqliteSessionMetricsStoreTests : IDisposable
         Assert.Equal("openai", listing.TranslationProvider);
         Assert.Equal(1, listing.CascadeUtteranceCount);
         Assert.Equal(1, listing.RealtimeUtteranceCount);
+        Assert.Equal("gpt-4o-mini-transcribe", listing.SttModel);
+        Assert.Equal("live", listing.Kind);
+        Assert.Null(listing.Wer);
+    }
+
+    /// <summary>
+    /// Catches the Lab table showing wrong per-run numbers: each conversation's listing
+    /// must carry per-mode end-to-end medians from only its own completed utterances.
+    /// </summary>
+    [Fact]
+    public async Task Listing_ComputesPerModeEndToEndMedians()
+    {
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        var report = SampleReport() with
+        {
+            Utterances =
+            [
+                new UtteranceMetricsRecord("cascade:a", InterpreterMode.Cascade, 1000, []),
+                new UtteranceMetricsRecord("cascade:b", InterpreterMode.Cascade, 3000, []),
+                new UtteranceMetricsRecord("cascade:c", InterpreterMode.Cascade, null, []),
+                new UtteranceMetricsRecord("realtime:d", InterpreterMode.Realtime, 900, []),
+            ],
+        };
+        await store.SaveConversationAsync(report, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+
+        var listing = Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
+
+        Assert.Equal(2000, listing.CascadeEndToEndMedianMs);
+        Assert.Equal(900, listing.RealtimeEndToEndMedianMs);
+    }
+
+    /// <summary>
+    /// Catches an upgrade wiping or breaking a database captured before the Lab
+    /// columns existed: opening an old-schema file must add the new columns in place,
+    /// keep its rows, and default them to the pre-Lab reality (default STT, live).
+    /// </summary>
+    [Fact]
+    public async Task OldSchemaDatabase_IsMigratedInPlace_KeepingRows()
+    {
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}"))
+        {
+            connection.Open();
+            using var create = connection.CreateCommand();
+            create.CommandText = """
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY, source_lang TEXT NOT NULL, target_lang TEXT NOT NULL,
+                    translation_provider TEXT NOT NULL, started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER NOT NULL);
+                INSERT INTO conversations VALUES ('conv-old', 'en', 'es', 'openai', 1, 2);
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        var listing = Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
+
+        Assert.Equal("conv-old", listing.ConversationId);
+        Assert.Equal("gpt-4o-mini-transcribe", listing.SttModel);
+        Assert.Equal("live", listing.Kind);
     }
 
     /// <summary>
@@ -64,7 +122,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task ResavingSameConversation_ReplacesInsteadOfDuplicating()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport(), "openai", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
 
         var updated = SampleReport() with
         {
@@ -75,7 +133,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                     Stages: [new StageTimingRecord("sttFinal", 500)]),
             ],
         };
-        await store.SaveConversationAsync(updated, "openai", CancellationToken.None);
+        await store.SaveConversationAsync(updated, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
 
         var listing = Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
         Assert.Equal(1, listing.CascadeUtteranceCount);
@@ -97,8 +155,8 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     public async Task Summary_GroupsCascadeByProvider_AndCollapsesRealtime()
     {
         var store = new SqliteSessionMetricsStore(_dbPath);
-        await store.SaveConversationAsync(SampleReport("conv-openai"), "openai", CancellationToken.None);
-        await store.SaveConversationAsync(SampleReport("conv-anthropic"), "anthropic", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-openai"), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-anthropic"), "anthropic", "gpt-4o-mini-transcribe", CancellationToken.None);
 
         var summary = await store.GetSummaryAsync(CancellationToken.None);
 
@@ -140,7 +198,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                         Stages: [new StageTimingRecord("sttFinal", i * 100)]),
                 ],
                 Transcript: []);
-            await store.SaveConversationAsync(report, "openai", CancellationToken.None);
+            await store.SaveConversationAsync(report, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
         }
 
         var summary = await store.GetSummaryAsync(CancellationToken.None);
@@ -182,7 +240,7 @@ public class SqliteSessionMetricsStoreTests : IDisposable
                     Stages: [new StageTimingRecord("sttFinal", 500)]),
             ],
             Transcript: []);
-        await store.SaveConversationAsync(report, "openai", CancellationToken.None);
+        await store.SaveConversationAsync(report, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
 
         var summary = await store.GetSummaryAsync(CancellationToken.None);
 

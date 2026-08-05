@@ -142,6 +142,128 @@
   padding: var(--space-4);
 }
 
+.app-shell__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.app-shell__views {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+}
+
+.app-shell__view-tab {
+  font: inherit;
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.app-shell__view-tab[aria-pressed='true'] {
+  border-color: var(--color-accent);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.session-panel__stage-select {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+  min-width: 0;
+}
+
+.session-panel__stage-select:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.lab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: var(--space-4);
+  background: var(--color-surface);
+}
+
+.lab-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lab-panel h3 {
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.lab-panel__refresh {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.lab-panel__empty,
+.lab-panel__error {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.lab-panel__error {
+  color: var(--color-danger);
+}
+
+.lab-panel__table-scroll {
+  overflow-x: auto;
+}
+
+.lab-panel__table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.lab-panel__table th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  padding: var(--space-1) var(--space-4) var(--space-1) 0;
+  white-space: nowrap;
+}
+
+.lab-panel__table td {
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-2) var(--space-4) var(--space-2) 0;
+  white-space: nowrap;
+}
+
 .session-panel__toolbar {
   display: flex;
   flex-wrap: wrap;

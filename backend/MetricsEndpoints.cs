@@ -54,7 +54,23 @@ public static class MetricsEndpoints
             return Results.BadRequest(new MetricsErrorResponse("utterances and transcript are required (may be empty)."));
         }
 
-        await store.SaveConversationAsync(report, translationProvider.Value, cancellationToken);
+        // Stage config is identity, not observation: an unknown value would corrupt
+        // the Lab table's config grouping, so unlike stage/timing data it is validated.
+        if (report.SttModel is not null && !StageModels.IsSupportedSttModel(report.SttModel))
+        {
+            return Results.BadRequest(new MetricsErrorResponse($"Unsupported STT model '{report.SttModel}'."));
+        }
+
+        if (report.MtProvider is not null && !StageModels.IsSupportedMtProvider(report.MtProvider))
+        {
+            return Results.BadRequest(new MetricsErrorResponse($"Unsupported MT provider '{report.MtProvider}'."));
+        }
+
+        await store.SaveConversationAsync(
+            report,
+            report.MtProvider ?? translationProvider.Value,
+            report.SttModel ?? StageModels.SttModels[0],
+            cancellationToken);
         return Results.NoContent();
     }
 

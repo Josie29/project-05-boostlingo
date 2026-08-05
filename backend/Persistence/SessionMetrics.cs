@@ -70,6 +70,11 @@ public enum TranscriptLane
 /// <param name="Transcript">The conversation's transcript entries, kept so quality
 /// (e.g. an MT provider comparison's translation output) can be reviewed alongside
 /// the latency numbers, not just speed.</param>
+/// <param name="SttModel">The session's negotiated STT model (Lab P1), or <c>null</c>
+/// when the client didn't pick — the save stamps the default so stored rows always
+/// name what actually ran.</param>
+/// <param name="MtProvider">The session's negotiated MT provider, or <c>null</c> for
+/// the process default (stamped server-side at save).</param>
 public sealed record ConversationMetricsReport(
     string ConversationId,
     string SourceLang,
@@ -77,7 +82,9 @@ public sealed record ConversationMetricsReport(
     long StartedAtMs,
     long EndedAtMs,
     IReadOnlyList<UtteranceMetricsRecord> Utterances,
-    IReadOnlyList<TranscriptEntryRecord> Transcript);
+    IReadOnlyList<TranscriptEntryRecord> Transcript,
+    string? SttModel = null,
+    string? MtProvider = null);
 
 /// <summary>
 /// One utterance's latency breakdown - the persisted form of the frontend's
@@ -129,6 +136,11 @@ public sealed record TranscriptEntryRecord(
 /// <param name="EndedAtMs">Client clock at Stop.</param>
 /// <param name="RealtimeUtteranceCount">Utterances captured in realtime mode.</param>
 /// <param name="CascadeUtteranceCount">Utterances captured in cascade mode.</param>
+/// <param name="SttModel">The STT model the conversation's cascade utterances ran on (stamped at save).</param>
+/// <param name="Kind"><c>"live"</c> for mic sessions; <c>"experiment"</c> reserved for Lab P3 fixture runs.</param>
+/// <param name="Wer">Word Error Rate for fixture runs, or <c>null</c> for live sessions (no ground truth).</param>
+/// <param name="RealtimeEndToEndMedianMs">Median realtime end-to-end, or <c>null</c> with no completed realtime utterances.</param>
+/// <param name="CascadeEndToEndMedianMs">Median cascade end-to-end, or <c>null</c> with no completed cascade utterances.</param>
 public sealed record ConversationListing(
     string ConversationId,
     string SourceLang,
@@ -137,7 +149,12 @@ public sealed record ConversationListing(
     long StartedAtMs,
     long EndedAtMs,
     int RealtimeUtteranceCount,
-    int CascadeUtteranceCount);
+    int CascadeUtteranceCount,
+    string SttModel,
+    string Kind,
+    double? Wer,
+    double? RealtimeEndToEndMedianMs,
+    double? CascadeEndToEndMedianMs);
 
 /// <summary>
 /// Cross-session latency statistics, grouped exactly the way <c>docs/benchmarks.md</c>'s

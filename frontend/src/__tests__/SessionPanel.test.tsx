@@ -17,6 +17,9 @@ function renderPanel(overrides: Partial<SessionPanelProps> = {}) {
     latencyAveragesByMode: { realtime: EMPTY_LATENCY_AVERAGES, cascade: EMPTY_LATENCY_AVERAGES },
     notice: null,
     architecture: null,
+    stageModels: {},
+    onStageModelsChange: vi.fn(),
+    stageModelsLocked: false,
     onModeChange: vi.fn(),
     onStart: vi.fn(),
     onStop: vi.fn(),
@@ -55,31 +58,51 @@ describe('SessionPanel', () => {
       mt: { provider: 'openai', model: 'gpt-4o-mini' },
       mtAlternative: { provider: 'anthropic', model: 'claude-haiku-4-5' },
       tts: { model: 'gpt-4o-mini-tts' },
+      sttOptions: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe'],
     },
   };
 
-  // Catches the architecture cards not actually saying what runs: each paradigm's
-  // card must show its model(s), with the MT row carrying its provider.
-  it('renders each paradigm\'s models on its mode card', () => {
+  // Catches the architecture cards not actually saying what runs: realtime and TTS
+  // show their models, and the STT/MT pickers default to the backend's active config.
+  it('renders each paradigm\'s models, with pickers defaulting to the active config', () => {
     renderPanel({ architecture: ARCHITECTURE });
 
     expect(screen.getByText('gpt-realtime')).toBeInTheDocument();
-    expect(screen.getByText('gpt-4o-mini-transcribe')).toBeInTheDocument();
-    expect(screen.getByText('gpt-4o-mini')).toBeInTheDocument();
-    expect(screen.getByText('openai')).toBeInTheDocument();
     expect(screen.getByText('gpt-4o-mini-tts')).toBeInTheDocument();
+    expect(screen.getByLabelText('STT model')).toHaveValue('gpt-4o-mini-transcribe');
+    expect(screen.getByLabelText('MT provider')).toHaveValue('openai');
+  });
+
+  // Catches a stage pick not reaching the session config: choosing the alternate
+  // STT model or MT provider must surface through onStageModelsChange.
+  it('reports stage picker changes with the chosen model and provider', () => {
+    const props = renderPanel({ architecture: ARCHITECTURE });
+
+    fireEvent.change(screen.getByLabelText('STT model'), { target: { value: 'gpt-4o-transcribe' } });
+    fireEvent.change(screen.getByLabelText('MT provider'), { target: { value: 'anthropic' } });
+
+    expect(props.onStageModelsChange).toHaveBeenCalledWith({ sttModel: 'gpt-4o-transcribe' });
+    expect(props.onStageModelsChange).toHaveBeenCalledWith({ mtProvider: 'anthropic' });
+  });
+
+  // Catches a mid-session model change silently not applying (the session already
+  // negotiated its models at start): pickers must lock while a session is live.
+  it('disables the stage pickers while locked', () => {
+    renderPanel({ architecture: ARCHITECTURE, stageModelsLocked: true });
+
+    expect(screen.getByLabelText('STT model')).toBeDisabled();
+    expect(screen.getByLabelText('MT provider')).toBeDisabled();
   });
 
   // Catches the provider-swap story staying invisible: expanding the cascade
-  // card's details must name the other provider and the model a swap would run.
+  // card's details must show the swap that selecting the other provider performs.
   it('reveals the MT provider swap in the cascade card\'s details', () => {
     renderPanel({ architecture: ARCHITECTURE });
-    expect(screen.queryByText(/claude-haiku-4-5/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/TRANSLATION_PROVIDER=anthropic/)).not.toBeInTheDocument();
 
     const cascadeCard = screen.getByRole('radio', { name: 'Cascade' });
     fireEvent.click(within(cascadeCard).getByRole('button', { name: 'Details' }));
 
-    expect(screen.getByText('claude-haiku-4-5')).toBeInTheDocument();
     expect(screen.getByText(/TRANSLATION_PROVIDER=anthropic/)).toBeInTheDocument();
   });
 

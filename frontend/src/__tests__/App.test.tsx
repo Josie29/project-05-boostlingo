@@ -52,6 +52,7 @@ function stubBackendFetches(): void {
               mt: { provider: 'openai', model: 'gpt-4o-mini' },
               mtAlternative: { provider: 'anthropic', model: 'claude-haiku-4-5' },
               tts: { model: 'gpt-4o-mini-tts' },
+              sttOptions: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe'],
             },
           }),
         });
