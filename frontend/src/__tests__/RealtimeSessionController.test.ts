@@ -386,10 +386,12 @@ describe('RealtimeSessionController', () => {
     expect(raw.close).toHaveBeenCalledOnce();
   });
 
-  // Same trigger as the "failed" case above, but for "disconnected" — some
-  // browsers/networks report a dropped connection this way instead of (or
-  // before) "failed", and both need the same Reconnect-eligible treatment.
-  it('transitions a connected session to "error" (reconnectable) when the peer connection reports "disconnected"', async () => {
+  // Catches the bug this fix addresses: ICE (Interactive Connectivity
+  // Establishment) connectivity checks routinely bounce "disconnected" ->
+  // "connected" within seconds on a flaky network without the media path
+  // actually being lost. Treating "disconnected" as immediately fatal (the
+  // old behavior) tore down sessions that were about to self-recover.
+  it('does not immediately tear down a connected session when the peer connection reports "disconnected"', async () => {
     const { pc, raw } = fakePeerConnection();
     const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
     const controller = new RealtimeSessionController(deps);
@@ -397,8 +399,60 @@ describe('RealtimeSessionController', () => {
     await controller.start();
     setConnectionState(raw, 'disconnected');
 
-    expect(controller.getState().status).toBe('error');
-    expect(controller.getState().reconnectable).toBe(true);
+    expect(controller.getState().status).toBe('connected');
+    expect(raw.close).not.toHaveBeenCalled();
+  });
+
+  // Catches the self-recovery case the grace period exists for: a
+  // "disconnected" that flips back to "connected" within the grace window
+  // must cancel the pending failure timer rather than tearing the session
+  // down late anyway.
+  it('cancels the pending failure when "disconnected" recovers to "connected" within the grace period', async () => {
+    vi.useFakeTimers();
+    try {
+      const { pc, raw } = fakePeerConnection();
+      const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+      const controller = new RealtimeSessionController(deps);
+
+      await controller.start();
+      setConnectionState(raw, 'disconnected');
+      setConnectionState(raw, 'connected');
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(controller.getState()).toEqual({ status: 'connected', errorMessage: null, errorKind: null, reconnectable: false });
+      expect(raw.close).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Same eventual outcome as the "failed" case above, but for a
+  // "disconnected" that never recovers — once the grace period elapses it
+  // must still surface as a Reconnect-eligible error rather than staying
+  // "connected" forever.
+  it('transitions a connected session to "error" (reconnectable) when "disconnected" persists past the grace period', async () => {
+    vi.useFakeTimers();
+    try {
+      const { pc, raw } = fakePeerConnection();
+      const deps = buildDeps({ createPeerConnection: vi.fn(() => pc) });
+      const controller = new RealtimeSessionController(deps);
+
+      await controller.start();
+      setConnectionState(raw, 'disconnected');
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(controller.getState()).toEqual({
+        status: 'error',
+        errorMessage: 'The realtime connection was lost.',
+        errorKind: null,
+        reconnectable: true,
+      });
+      expect(raw.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Catches an over-eager bug: our own stop()/teardown() also drives the peer

@@ -65,7 +65,7 @@ describe('RealtimeLatencyTracker', () => {
   // RealtimeInterpreterSession keeps one instance alive across start()/stop() cycles)
   // must not let a leftover speech_stopped anchor from a previous conversation pair
   // with a playing event from a brand-new one after reset().
-  it('reset() clears any pending anchor and restarts the turn counter', () => {
+  it('reset() clears any pending anchor', () => {
     const tracker = new RealtimeLatencyTracker();
     tracker.handleEvent({ type: 'input_audio_buffer.speech_stopped' }, 1_000);
     tracker.reset();
@@ -75,5 +75,24 @@ describe('RealtimeLatencyTracker', () => {
     tracker.handleEvent({ type: 'input_audio_buffer.speech_stopped' }, 6_000);
     const report = tracker.handleAudioPlaying(6_200);
     expect(report).toEqual({ utteranceId: 'turn-1', stages: [], endToEndMs: 200 });
+  });
+
+  // Catches a reconnect-corrupts-history bug: useInterpreterSession deliberately keeps
+  // preserved latency reports across a reset() (reconnect/mode-switch), so a turn minted
+  // after reset() must not reuse an id already used before it — otherwise the shared
+  // latency reducer overwrites the preserved pre-reset report in place instead of adding
+  // a distinct new one, silently corrupting session-average math.
+  it('mints a turn id distinct from pre-reset turns, so reconnects do not collide with preserved latency history', () => {
+    const tracker = new RealtimeLatencyTracker();
+    tracker.handleEvent({ type: 'input_audio_buffer.speech_stopped' }, 1_000);
+    const beforeReset = tracker.handleAudioPlaying(1_200);
+
+    tracker.reset();
+
+    tracker.handleEvent({ type: 'input_audio_buffer.speech_stopped' }, 6_000);
+    const afterReset = tracker.handleAudioPlaying(6_200);
+
+    expect(beforeReset?.utteranceId).toBe('turn-1');
+    expect(afterReset?.utteranceId).not.toBe(beforeReset?.utteranceId);
   });
 });

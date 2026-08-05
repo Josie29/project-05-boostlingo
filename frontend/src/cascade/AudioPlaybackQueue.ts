@@ -122,26 +122,31 @@ export class AudioPlaybackQueue {
   }
 
   /**
-   * Interrupts playback for a barge-in (issue #11): if the utterance
-   * currently occupying the scheduling cursor is among
-   * `supersededUtteranceIds`, stops and discards every scheduled-but-unfinished
-   * source for it and resets the cursor to "now," so the very next enqueued
-   * chunk — typically the utterance whose speech onset triggered this
-   * barge-in — starts audibly immediately rather than waiting out whatever
-   * was left of the flushed utterance's runtime. A no-op if nothing this
-   * queue has scheduled belongs to a superseded id (e.g. the barge-in only
-   * dropped queued-but-unstarted phrases that were never sent to this queue
-   * in the first place, since the backend never called the TTS provider for
-   * them).
+   * Interrupts playback for a barge-in (issue #11): stops and discards
+   * *every* scheduled-but-unfinished source and resets the cursor to "now,"
+   * so the very next enqueued chunk — typically the utterance whose speech
+   * onset triggered this barge-in — starts audibly immediately rather than
+   * waiting out whatever was left queued.
+   *
+   * Deliberately unconditional on `currentUtteranceId` rather than gated on
+   * it appearing in `supersededUtteranceIds`: the backend only lists
+   * still-*pending* utterances there, so an utterance that already received
+   * its `'end'` event (and so cleared `currentUtteranceId`) never appears —
+   * yet its tail chunks can still be scheduled and audible here, since audio
+   * scheduling runs ahead of the event stream. Everything this queue has
+   * scheduled by the time any barge-in arrives necessarily predates it, so
+   * a non-empty `supersededUtteranceIds` list (i.e. an actual barge-in, not
+   * a no-op call) is reason enough to flush all of it — otherwise stale TTS
+   * audio keeps talking over the caller after they've interrupted.
+   *
+   * A no-op only when `supersededUtteranceIds` is empty (nothing to flush).
    *
    * Unlike {@link stop}, the AudioContext itself is left open — a barge-in
    * is mid-session, not a session teardown — so the next utterance's audio
    * can be scheduled without paying to reopen a fresh context.
    */
   flush(supersededUtteranceIds: readonly string[]): void {
-    if (this.currentUtteranceId === null || !supersededUtteranceIds.includes(this.currentUtteranceId)) {
-      return;
-    }
+    if (supersededUtteranceIds.length === 0) return;
 
     for (const source of this.activeSources) {
       source.onended = null;
@@ -219,6 +224,14 @@ export class AudioPlaybackQueue {
       this.contextAnchorNowMs = this.deps.now();
       this.contextAnchorTime = this.audioContext.currentTime;
     }
+    if (this.audioContext.state === 'suspended') {
+      // A context created outside a user-activation window (e.g. the first
+      // chunk of a session arriving asynchronously, off the click/tap that
+      // started it) can come up suspended; resuming is cheap and idempotent,
+      // so it's safe to attempt on every call rather than tracking whether
+      // we've already tried.
+      void this.audioContext.resume();
+    }
     return this.audioContext;
   }
 
@@ -245,9 +258,16 @@ export class AudioPlaybackQueue {
     this.pendingFirstChunkUtteranceId = null;
     this.currentUtteranceId = null;
 
-    if (this.audioContext) {
-      await this.audioContext.close();
-      this.audioContext = null;
+    // Capture-and-null before the async close() so a concurrent second
+    // stop() call (e.g. both a barge-in cleanup path and an explicit
+    // session teardown racing each other) sees `this.audioContext` already
+    // cleared and skips closing an already-closing/closed context — closing
+    // it twice throws, and since nothing awaits that second call's promise
+    // it would surface as an unhandled rejection.
+    const ctx = this.audioContext;
+    this.audioContext = null;
+    if (ctx && ctx.state !== 'closed') {
+      await ctx.close().catch(() => {});
     }
   }
 }

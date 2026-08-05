@@ -1,15 +1,15 @@
-import type { SessionMode } from '../session/InterpreterSession';
 import type { LatencyReport, LatencySessionAverages } from '../latency/types';
 
-/** Perceived-latency targets from the brief, shown as a subtle hint rather than a pass/fail gate — no timers, no pressure. */
-const BENCHMARK_HINT_MS: Record<SessionMode, number> = {
-  realtime: 1_500,
-  cascade: 3_000,
-};
-
 export interface LatencyPanelProps {
-  /** Which transport produced these reports — used only to pick the benchmark hint text below; never branched on for anything else. */
-  mode: SessionMode;
+  /**
+   * The perceived-latency target (ms) to show as a subtle hint, shown rather
+   * than a pass/fail gate — no timers, no pressure. Mode-awareness (which
+   * transport implies which target) lives in `SessionPanel`, the one
+   * sanctioned mode-aware component — this panel just renders whatever
+   * number it's given, keeping it usable for any future transport without
+   * needing its own entry in a mode->benchmark table here.
+   */
+  benchmarkMs: number;
   /** The most recently appeared utterances' latency breakdowns, oldest first (mirrors `TranscriptPanel`'s append-order convention). */
   recentReports: LatencyReport[];
   /** Session-wide running averages, recomputed from every report accumulated so far. */
@@ -32,12 +32,12 @@ function formatMs(ms: number): string {
  * Deliberately informational only: no timers, no pass/fail styling on the
  * benchmark hint, nothing framed as a grade — just what actually happened.
  */
-export function LatencyPanel({ mode, recentReports, averages }: LatencyPanelProps) {
+export function LatencyPanel({ benchmarkMs, recentReports, averages }: LatencyPanelProps) {
   return (
     <section className="latency-panel" aria-label="Latency">
       <div className="latency-panel__header">
         <h3>Latency</h3>
-        <p className="latency-panel__hint">Target: under {(BENCHMARK_HINT_MS[mode] / 1000).toFixed(1)}s</p>
+        <p className="latency-panel__hint">Target: under {(benchmarkMs / 1000).toFixed(1)}s</p>
       </div>
 
       <div className="latency-panel__averages">

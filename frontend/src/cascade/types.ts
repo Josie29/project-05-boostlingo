@@ -1,36 +1,23 @@
-/**
- * Lifecycle states for a cascade-mode session. Mirrors `RealtimeSessionStatus`
- * (`../realtime/types.ts`) so shared/mode-agnostic UI can render either
- * transport's state identically; no WebSocket, AudioContext, or envelope
- * detail leaks past this boundary.
- */
-export type CascadeSessionStatus = 'idle' | 'requesting-mic' | 'connecting' | 'connected' | 'error';
+import { INITIAL_SESSION_STATE, type SessionErrorKind, type SessionState, type SessionStatus } from '../session/sessionState';
 
 /**
- * Narrows *why* an `'error'` status happened (issue #12). Mirrors
- * `SessionErrorKind` (`../session/InterpreterSession.ts`) independently, same
- * as `CascadeSessionStatus` already mirrors `SessionStatus`.
+ * Lifecycle states for a cascade-mode session — a cascade-mode alias for the
+ * shared {@link SessionStatus} (`../session/sessionState.ts`), which is where
+ * the actual vocabulary lives now that both transports' controllers
+ * converged on identical states. So shared/mode-agnostic UI can render
+ * either transport's state identically; no WebSocket, AudioContext, or
+ * envelope detail leaks past this boundary.
  */
-export type CascadeErrorKind = 'mic-denied' | 'mic-not-found' | null;
+export type CascadeSessionStatus = SessionStatus;
 
-/** Small state snapshot the UI renders from. */
-export interface CascadeSessionState {
-  status: CascadeSessionStatus;
-  /** Human-readable failure reason, set only when `status` is `'error'`. */
-  errorMessage: string | null;
-  /** See {@link CascadeErrorKind}. `null` unless `status` is `'error'`. */
-  errorKind: CascadeErrorKind;
-  /** True when a previously-`'connected'` session died (a `recoverable: false` stage/session error) rather than never having connected — drives the Reconnect vs. plain-retry affordance. See `SessionState.reconnectable`'s remarks. */
-  reconnectable: boolean;
-}
+/** Cascade-mode alias for the shared {@link SessionErrorKind} (issue #12). */
+export type CascadeErrorKind = SessionErrorKind;
+
+/** Cascade-mode alias for the shared {@link SessionState} snapshot shape. */
+export type CascadeSessionState = SessionState;
 
 /** The state a controller starts in and returns to after `stop()`. */
-export const INITIAL_CASCADE_SESSION_STATE: CascadeSessionState = {
-  status: 'idle',
-  errorMessage: null,
-  errorKind: null,
-  reconnectable: false,
-};
+export const INITIAL_CASCADE_SESSION_STATE: CascadeSessionState = INITIAL_SESSION_STATE;
 
 /**
  * Current version of the `{ v, type, payload }` wire envelope. Matches

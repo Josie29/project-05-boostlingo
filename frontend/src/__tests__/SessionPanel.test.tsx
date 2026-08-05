@@ -112,6 +112,19 @@ describe('SessionPanel', () => {
     expect(screen.getByText('sttFinal: 210ms')).toBeInTheDocument();
   });
 
+  // Catches the benchmark-hint wiring bug: Realtime and Cascade have different
+  // targets per the brief (1.5s vs 3s), and `SessionPanel` (not the
+  // mode-agnostic `LatencyPanel`) is what picks which one applies — the panel
+  // must pick the hint matching the active mode, not always show one or the
+  // other.
+  it('passes the benchmark hint matching the active mode down to the latency panel', () => {
+    renderPanel({ mode: 'realtime' });
+    expect(screen.getByText('Target: under 1.5s')).toBeInTheDocument();
+
+    renderPanel({ mode: 'cascade' });
+    expect(screen.getByText('Target: under 3.0s')).toBeInTheDocument();
+  });
+
   // Catches the bug where a backend error surfaces silently (or not at all) instead
   // of showing the transport's own explanation of what went wrong.
   it('shows the error message when status is error', () => {

@@ -35,8 +35,18 @@ interface CascadeEnvelopeShape {
   payload?: unknown;
 }
 
+/**
+ * The subset of {@link CascadeTranscriptPayload}'s fields this adapter
+ * actually consumes to build a {@link TranscriptUpdate}. `timestampMs` is
+ * part of the wire shape but nothing downstream of this adapter reads it —
+ * narrowing the return type to just what's used (rather than fabricating a
+ * bogus `timestampMs: 0` default to satisfy the full payload type) means a
+ * caller can't accidentally come to rely on a value that was never real.
+ */
+type ConsumedTranscriptPayload = Pick<CascadeTranscriptPayload, 'utteranceId' | 'lane' | 'text'>;
+
 /** Narrows an unknown envelope's `payload` to the fields a transcript update needs, or `null` if any are missing/mistyped. */
-function readTranscriptPayload(payload: unknown): CascadeTranscriptPayload | null {
+function readTranscriptPayload(payload: unknown): ConsumedTranscriptPayload | null {
   if (typeof payload !== 'object' || payload === null) return null;
   const candidate = payload as Partial<CascadeTranscriptPayload>;
   if (
@@ -46,12 +56,7 @@ function readTranscriptPayload(payload: unknown): CascadeTranscriptPayload | nul
   ) {
     return null;
   }
-  return {
-    utteranceId: candidate.utteranceId,
-    lane: candidate.lane,
-    text: candidate.text,
-    timestampMs: typeof candidate.timestampMs === 'number' ? candidate.timestampMs : 0,
-  };
+  return { utteranceId: candidate.utteranceId, lane: candidate.lane, text: candidate.text };
 }
 
 /** Narrows an unknown envelope's `payload` to the id a `transcript.truncated` update needs, or `null` if missing/mistyped. */

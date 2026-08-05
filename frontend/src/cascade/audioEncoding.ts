@@ -10,9 +10,9 @@
 /**
  * Linearly resamples mono Float32 audio from `inputSampleRate` down to
  * `outputSampleRate`. Used to convert whatever native rate the browser's
- * AudioContext captures at (commonly 44.1kHz or 48kHz) down to the 16kHz the
- * cascade backend requires (`CascadeAudioFormat.SampleRateHz` in
- * `backend/CascadeAudioSession.cs`).
+ * AudioContext captures at (commonly 44.1kHz or 48kHz) down to the rate the
+ * cascade backend requires, `CascadeAudioFormat.SampleRateHz` in
+ * `backend/CascadeAudioSession.cs`.
  *
  * @param input Mono samples in the AudioContext's native range of [-1, 1].
  * @param inputSampleRate The sample rate `input` was captured at, in Hz.

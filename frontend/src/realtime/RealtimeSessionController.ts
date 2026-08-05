@@ -1,6 +1,7 @@
 import { createRealtimeSession, type LanguagePair, type RealtimeSessionInfo } from '../api';
 import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
 import { MicAccessError, wrapMicError } from '../audio/micErrors';
+import { ListenerSet } from '../session/listenerSet';
 import {
   INITIAL_REALTIME_SESSION_STATE,
   type RealtimeErrorKind,
@@ -10,6 +11,17 @@ import {
 
 const OPENAI_REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 const DATA_CHANNEL_LABEL = 'oai-events';
+
+/**
+ * How long a `connectionState === 'disconnected'` is tolerated before it's
+ * treated as a real failure. ICE (Interactive Connectivity Establishment)
+ * connectivity checks routinely bounce `disconnected` -> `connected` within a
+ * second or two on a flaky network without the media path actually being
+ * lost — only `'failed'` is unambiguously terminal on its own. Giving
+ * `'disconnected'` a short grace window avoids tearing down sessions that
+ * were about to self-recover.
+ */
+const DISCONNECT_GRACE_MS = 5_000;
 
 /**
  * Client event sent over the data channel as soon as it opens, turning on
@@ -97,8 +109,8 @@ type EventListener = (event: unknown) => void;
 export class RealtimeSessionController {
   private readonly deps: RealtimeSessionControllerDeps;
   private readonly audioElement: HTMLAudioElement;
-  private readonly listeners = new Set<Listener>();
-  private readonly eventListeners = new Set<EventListener>();
+  private readonly listeners = new ListenerSet<RealtimeSessionState>();
+  private readonly eventListeners = new ListenerSet<unknown>();
 
   private state: RealtimeSessionState = INITIAL_REALTIME_SESSION_STATE;
   private localStream: MediaStream | null = null;
@@ -106,6 +118,8 @@ export class RealtimeSessionController {
   private dataChannel: RTCDataChannel | null = null;
   /** Bumped on every start()/stop() so a stale async start() can detect it was superseded. */
   private generation = 0;
+  /** Pending `DISCONNECT_GRACE_MS` timer started on a `'disconnected'` transition, or `null` when none is outstanding. */
+  private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: Partial<RealtimeSessionControllerDeps> = {}, audioElement?: HTMLAudioElement) {
     this.deps = { ...defaultDeps(), ...deps };
@@ -125,11 +139,9 @@ export class RealtimeSessionController {
 
   /** Subscribes to state changes; returns an unsubscribe function. Fires once immediately with the current state. */
   subscribe(listener: Listener): () => void {
-    this.listeners.add(listener);
+    const unsubscribe = this.listeners.add(listener);
     listener(this.state);
-    return () => {
-      this.listeners.delete(listener);
-    };
+    return unsubscribe;
   }
 
   /**
@@ -139,10 +151,7 @@ export class RealtimeSessionController {
    * out what they care about. Returns an unsubscribe function.
    */
   subscribeToEvents(listener: EventListener): () => void {
-    this.eventListeners.add(listener);
-    return () => {
-      this.eventListeners.delete(listener);
-    };
+    return this.eventListeners.add(listener);
   }
 
   private setState(
@@ -152,7 +161,7 @@ export class RealtimeSessionController {
     reconnectable = false,
   ): void {
     this.state = { status, errorMessage, errorKind, reconnectable };
-    for (const listener of this.listeners) listener(this.state);
+    this.listeners.emit(this.state);
   }
 
   /**
@@ -167,7 +176,7 @@ export class RealtimeSessionController {
     } catch {
       return;
     }
-    for (const listener of this.eventListeners) listener(event);
+    this.eventListeners.emit(event);
   }
 
   /**
@@ -219,14 +228,27 @@ export class RealtimeSessionController {
       // Issue #12: the only way this controller previously noticed a dead peer
       // connection was the user hitting Stop — a network drop or the remote
       // side hanging up mid-call left `status` stuck on `'connected'` forever.
-      // `'failed'`/`'disconnected'` both mean the media path is down; `'closed'`
-      // is excluded since our own `teardown()` reaching this same state is
-      // expected, not a failure to report.
+      // `'failed'` means the media path is unrecoverable and is fatal
+      // immediately. `'disconnected'` is a routine, often self-recovering ICE
+      // blip (see `DISCONNECT_GRACE_MS`) rather than an immediate failure. A
+      // transition back to `'connected'` cancels any pending grace timer.
+      // `'closed'` is excluded since our own `teardown()` reaching this same
+      // state is expected, not a failure to report.
       peerConnection.onconnectionstatechange = () => {
         if (myGeneration !== this.generation) return;
         const state = peerConnection.connectionState;
-        if (state === 'failed' || state === 'disconnected') {
+        if (state === 'failed') {
+          this.clearDisconnectTimer();
           this.handlePostConnectFailure('The realtime connection was lost.');
+        } else if (state === 'disconnected') {
+          this.clearDisconnectTimer();
+          this.disconnectTimer = setTimeout(() => {
+            this.disconnectTimer = null;
+            if (myGeneration !== this.generation) return;
+            this.handlePostConnectFailure('The realtime connection was lost.');
+          }, DISCONNECT_GRACE_MS);
+        } else if (state === 'connected') {
+          this.clearDisconnectTimer();
         }
       };
 
@@ -285,7 +307,16 @@ export class RealtimeSessionController {
     this.setState('idle');
   }
 
+  /** Cancels a pending `'disconnected'` grace timer, if one is outstanding. */
+  private clearDisconnectTimer(): void {
+    if (this.disconnectTimer !== null) {
+      clearTimeout(this.disconnectTimer);
+      this.disconnectTimer = null;
+    }
+  }
+
   private teardown(): void {
+    this.clearDisconnectTimer();
     if (this.dataChannel) {
       this.dataChannel.onopen = null;
       this.dataChannel.onmessage = null;

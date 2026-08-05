@@ -1,6 +1,9 @@
 import type { LanguagePair } from '../api';
 import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
+import { INITIAL_SESSION_STATE, type SessionErrorKind, type SessionState, type SessionStatus } from './sessionState';
+
+export { INITIAL_SESSION_STATE, type SessionErrorKind, type SessionState, type SessionStatus };
 
 /**
  * The two interpretation transports the workbench can drive a session with.
@@ -9,52 +12,6 @@ import type { TranscriptUpdate } from '../transcript/types';
  * so the mode toggle itself has something to render two options from.
  */
 export type SessionMode = 'realtime' | 'cascade';
-
-/**
- * Lifecycle states shared by both transports. `RealtimeSessionController` and
- * `CascadeSessionController` already independently converged on this exact
- * vocabulary, which is what makes a single mode-agnostic status display
- * possible in the first place.
- */
-export type SessionStatus = 'idle' | 'requesting-mic' | 'connecting' | 'connected' | 'error';
-
-/**
- * Narrows *why* an `'error'` status happened, for the two cases the shared UI
- * (issue #12) needs to render distinctly from a generic failure message:
- * `getUserMedia` being denied outright vs. no microphone existing at all.
- * `null` for every other failure (a token-mint 503/502/400, a dead socket, a
- * per-stage cascade failure that killed the session, ...), which the plain
- * `errorMessage` already explains well enough on its own.
- */
-export type SessionErrorKind = 'mic-denied' | 'mic-not-found' | null;
-
-/** Small state snapshot the UI renders from, regardless of which mode produced it. */
-export interface SessionState {
-  status: SessionStatus;
-  /** Human-readable failure reason, set only when `status` is `'error'`. */
-  errorMessage: string | null;
-  /** See {@link SessionErrorKind}. `null` unless `status` is `'error'`. */
-  errorKind: SessionErrorKind;
-  /**
-   * True when `status` is `'error'` *because a previously-`'connected'` session
-   * died mid-call* (a cascade stage error with `recoverable: false`, or a
-   * WebRTC connection drop) — issue #12's Reconnect affordance, which tears
-   * the dead transport down and starts a fresh one with the same language
-   * pair while preserving transcript history, applies only to this case.
-   * `false` for a failure that never reached `'connected'` in the first place
-   * (a denied mic, a failed token mint), where a plain `start()` retry is
-   * already the right recovery and there is nothing "re-" about it.
-   */
-  reconnectable: boolean;
-}
-
-/** The state every session starts in and returns to after `stop()`. */
-export const INITIAL_SESSION_STATE: SessionState = {
-  status: 'idle',
-  errorMessage: null,
-  errorKind: null,
-  reconnectable: false,
-};
 
 /**
  * One non-fatal, dismissible notice (issue #12): a single cascade stage
@@ -154,4 +111,9 @@ export function prefixId(mode: SessionMode, id: string): string {
 /** {@link prefixId}, specialized to a {@link TranscriptUpdate}'s `utteranceId` — see `prefixId`'s remarks for why this matters. */
 export function prefixUtteranceId(mode: SessionMode, update: TranscriptUpdate): TranscriptUpdate {
   return { ...update, utteranceId: prefixId(mode, update.utteranceId) };
+}
+
+/** {@link prefixId}, specialized to a {@link LatencyReport}'s `utteranceId` — see `prefixId`'s remarks for why this matters. */
+export function prefixLatencyReport(mode: SessionMode, report: LatencyReport): LatencyReport {
+  return { ...report, utteranceId: prefixId(mode, report.utteranceId) };
 }

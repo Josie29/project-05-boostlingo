@@ -1,7 +1,7 @@
 /**
  * Mode-agnostic transcript domain. Nothing in this module knows about
- * WebRTC, data channels, or any particular transport — Realtime mode and
- * the future cascade pipeline both adapt their own events into
+ * WebRTC, data channels, or any particular transport — both Realtime mode
+ * and the cascade pipeline adapt their own events into
  * {@link TranscriptUpdate}s and feed the same reducer, so
  * {@link TranscriptPanel} (and its tests) never need to know which mode
  * produced the text.

@@ -95,19 +95,23 @@ export async function createRealtimeSession(pair?: LanguagePair): Promise<Realti
       ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pair) }
       : {}),
   });
-  const body = (await response.json().catch(() => ({}))) as
-    | RealtimeSessionInfo
-    | RealtimeSessionErrorBody;
 
   if (!response.ok) {
-    const message =
-      'error' in body && body.error
-        ? body.error
-        : `Failed to create realtime session (status ${response.status})`;
+    // A non-2xx body is expected to be JSON (`RealtimeSessionErrorBody`), but
+    // swallow a parse failure here too — a plain-text error page from a
+    // proxy/gateway in front of the backend shouldn't itself crash error
+    // handling, and `message` already has a status-code fallback below.
+    const body = (await response.json().catch(() => ({}))) as RealtimeSessionErrorBody;
+    const message = body.error ?? `Failed to create realtime session (status ${response.status})`;
     throw new Error(message);
   }
 
-  return body as RealtimeSessionInfo;
+  // A malformed 2xx body (e.g. missing `clientSecret`) is a real bug worth
+  // surfacing loudly — unlike the error-body case above, this is never
+  // expected to fail parsing, so a thrown SyntaxError here should propagate
+  // rather than being masked into a bogus, silently-empty success value that
+  // would fail much later as a confusing "Bearer undefined" against OpenAI.
+  return (await response.json()) as RealtimeSessionInfo;
 }
 
 /**

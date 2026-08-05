@@ -4,7 +4,8 @@ import type { LatencyReport } from '../latency/types';
 import { RealtimeSessionController } from '../realtime/RealtimeSessionController';
 import { mapRealtimeEventToTranscriptUpdate } from '../realtime/realtimeTranscriptAdapter';
 import type { TranscriptUpdate } from '../transcript/types';
-import { prefixId, prefixUtteranceId, type InterpreterSession, type SessionState } from './InterpreterSession';
+import { prefixLatencyReport, prefixUtteranceId, type InterpreterSession, type SessionState } from './InterpreterSession';
+import { ListenerSet } from './listenerSet';
 
 /**
  * Thin adapter presenting {@link RealtimeSessionController} as an
@@ -33,7 +34,7 @@ export class RealtimeInterpreterSession implements InterpreterSession {
   readonly mode = 'realtime' as const;
   private readonly controller: RealtimeSessionController;
   private readonly latencyTracker: RealtimeLatencyTracker;
-  private readonly latencyListeners = new Set<(report: LatencyReport) => void>();
+  private readonly latencyListeners = new ListenerSet<LatencyReport>();
 
   constructor(
     controller: RealtimeSessionController = new RealtimeSessionController(),
@@ -50,8 +51,7 @@ export class RealtimeInterpreterSession implements InterpreterSession {
   /** Namespaces a report's utteranceId (see `prefixId`'s remarks) and fans it out, unless the tracker had no pending turn to report. */
   private emitLatencyReport(report: LatencyReport | null): void {
     if (!report) return;
-    const prefixed = { ...report, utteranceId: prefixId(this.mode, report.utteranceId) };
-    for (const listener of this.latencyListeners) listener(prefixed);
+    this.latencyListeners.emit(prefixLatencyReport(this.mode, report));
   }
 
   getState(): SessionState {
@@ -70,10 +70,7 @@ export class RealtimeInterpreterSession implements InterpreterSession {
   }
 
   subscribeToLatency(listener: (report: LatencyReport) => void): () => void {
-    this.latencyListeners.add(listener);
-    return () => {
-      this.latencyListeners.delete(listener);
-    };
+    return this.latencyListeners.add(listener);
   }
 
   start(pair: LanguagePair): Promise<void> {

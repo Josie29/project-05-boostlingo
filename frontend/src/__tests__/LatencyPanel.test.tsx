@@ -6,7 +6,7 @@ import { EMPTY_LATENCY_AVERAGES } from '../latency/types';
 
 function renderPanel(overrides: Partial<LatencyPanelProps> = {}) {
   const props: LatencyPanelProps = {
-    mode: 'cascade',
+    benchmarkMs: 3_000,
     recentReports: [],
     averages: EMPTY_LATENCY_AVERAGES,
     ...overrides,
@@ -66,14 +66,15 @@ describe('LatencyPanel', () => {
     expect(screen.getByText('sttFinal: 250ms')).toBeInTheDocument();
   });
 
-  // Catches the benchmark-hint wiring bug: Realtime and Cascade have different targets
-  // per the brief (1.5s vs 3s) — the panel must pick the hint matching the active mode,
-  // not always show one or the other.
-  it('shows the benchmark hint matching the active mode', () => {
-    renderPanel({ mode: 'realtime' });
+  // Catches a formatting bug: this panel renders whatever `benchmarkMs` it's
+  // given (mode->benchmark mapping is `SessionPanel`'s job, not this
+  // mode-agnostic panel's — see `SessionPanel.test.tsx` for that mapping)
+  // — the hint text must reflect that exact value, in seconds.
+  it('shows the given benchmark hint, in seconds', () => {
+    renderPanel({ benchmarkMs: 1_500 });
     expect(screen.getByText('Target: under 1.5s')).toBeInTheDocument();
 
-    render(<LatencyPanel mode="cascade" recentReports={[]} averages={EMPTY_LATENCY_AVERAGES} />);
+    render(<LatencyPanel benchmarkMs={3_000} recentReports={[]} averages={EMPTY_LATENCY_AVERAGES} />);
     expect(screen.getByText('Target: under 3.0s')).toBeInTheDocument();
   });
 });

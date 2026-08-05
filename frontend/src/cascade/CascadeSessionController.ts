@@ -3,6 +3,7 @@ import { MicPcmCapture } from './MicPcmCapture';
 import { DEFAULT_LANGUAGE_PAIR, type LanguagePair } from '../api';
 import { MIC_AUDIO_CONSTRAINTS } from '../audio/micConstraints';
 import { MicAccessError, wrapMicError } from '../audio/micErrors';
+import { ListenerSet } from '../session/listenerSet';
 import {
   CASCADE_ENVELOPE_VERSION,
   CascadeMessageType,
@@ -30,6 +31,24 @@ interface CascadeEnvelope {
   v?: number;
   type?: string;
   payload?: unknown;
+}
+
+/**
+ * The in-flight `connectAndStream()` handshake state {@link handleSocketMessage}/
+ * {@link handleEnvelope} need in order to react to a message without
+ * `connectAndStream` itself growing a steady-state event switch: the stream
+ * to hand mic capture once `session.ready` arrives, the socket to send
+ * captured chunks over, and the settle functions (plus a way to check
+ * whether one already fired) that resolve or reject `connectAndStream`'s
+ * promise.
+ */
+interface CascadeHandshake {
+  stream: MediaStream;
+  socket: WebSocket;
+  /** Whether `connectAndStream`'s promise has already settled (resolved or rejected). */
+  isSettled: () => boolean;
+  settleResolve: () => void;
+  settleReject: (message: string) => void;
 }
 
 /** Collaborators the controller needs, swappable in tests for jsdom's lack of real WebSocket/AudioContext/AudioWorklet APIs. */
@@ -106,10 +125,10 @@ type AudioEventListener = (event: CascadeAudioEvent) => void;
  */
 export class CascadeSessionController {
   private readonly deps: CascadeSessionControllerDeps;
-  private readonly listeners = new Set<Listener>();
-  private readonly eventListeners = new Set<EventListener>();
-  private readonly audioListeners = new Set<AudioEventListener>();
-  private readonly noticeListeners = new Set<NoticeListener>();
+  private readonly listeners = new ListenerSet<CascadeSessionState>();
+  private readonly eventListeners = new ListenerSet<unknown>();
+  private readonly audioListeners = new ListenerSet<CascadeAudioEvent>();
+  private readonly noticeListeners = new ListenerSet<CascadeNoticeEvent>();
 
   private state: CascadeSessionState = INITIAL_CASCADE_SESSION_STATE;
   private localStream: MediaStream | null = null;
@@ -145,11 +164,9 @@ export class CascadeSessionController {
 
   /** Subscribes to state changes; returns an unsubscribe function. Fires once immediately with the current state. */
   subscribe(listener: Listener): () => void {
-    this.listeners.add(listener);
+    const unsubscribe = this.listeners.add(listener);
     listener(this.state);
-    return () => {
-      this.listeners.delete(listener);
-    };
+    return unsubscribe;
   }
 
   /**
@@ -159,10 +176,7 @@ export class CascadeSessionController {
    * what they care about. Returns an unsubscribe function.
    */
   subscribeToEvents(listener: EventListener): () => void {
-    this.eventListeners.add(listener);
-    return () => {
-      this.eventListeners.delete(listener);
-    };
+    return this.eventListeners.add(listener);
   }
 
   /**
@@ -172,10 +186,7 @@ export class CascadeSessionController {
    * WebSocket or envelope details itself. Returns an unsubscribe function.
    */
   subscribeToAudio(listener: AudioEventListener): () => void {
-    this.audioListeners.add(listener);
-    return () => {
-      this.audioListeners.delete(listener);
-    };
+    return this.audioListeners.add(listener);
   }
 
   /**
@@ -186,10 +197,7 @@ export class CascadeSessionController {
    * itself. Returns an unsubscribe function.
    */
   subscribeToNotice(listener: NoticeListener): () => void {
-    this.noticeListeners.add(listener);
-    return () => {
-      this.noticeListeners.delete(listener);
-    };
+    return this.noticeListeners.add(listener);
   }
 
   private setState(
@@ -199,7 +207,7 @@ export class CascadeSessionController {
     reconnectable = false,
   ): void {
     this.state = { status, errorMessage, errorKind, reconnectable };
-    for (const listener of this.listeners) listener(this.state);
+    this.listeners.emit(this.state);
   }
 
   /**
@@ -261,6 +269,12 @@ export class CascadeSessionController {
    * starts mic capture streaming chunks over the socket. Resolves once
    * capture is running; rejects on an `error` envelope, a socket error, an
    * unexpected close, or a capture-start failure — whichever comes first.
+   *
+   * Limited to socket setup and settlement wiring — routing an incoming
+   * message and reacting to what it says both happen in
+   * {@link handleSocketMessage}/{@link handleEnvelope}, which this method
+   * hands a {@link CascadeHandshake} so they can resolve/reject the same
+   * promise without this method itself growing a steady-state event switch.
    */
   private connectAndStream(stream: MediaStream, pair: LanguagePair): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -284,6 +298,14 @@ export class CascadeSessionController {
       socket.binaryType = 'arraybuffer';
       this.socket = socket;
 
+      const handshake: CascadeHandshake = {
+        stream,
+        socket,
+        isSettled: () => settled,
+        settleResolve,
+        settleReject,
+      };
+
       socket.onopen = () => {
         socket.send(
           JSON.stringify({
@@ -294,109 +316,7 @@ export class CascadeSessionController {
         );
       };
 
-      socket.onmessage = (event: MessageEvent) => {
-        if (typeof event.data !== 'string') {
-          // A raw PCM16LE TTS audio frame (binaryType is 'arraybuffer', set
-          // above) — no envelope, no utteranceId of its own. Per the
-          // backend's framing contract (issue #7), it belongs to whichever
-          // utterance's tts.audio.start/tts.audio.end window we're
-          // currently inside; outside any such window there's no sound
-          // destination to associate it with, so it's dropped.
-          const utteranceId = this.currentAudioUtteranceId;
-          if (utteranceId) {
-            const data = event.data as ArrayBuffer;
-            for (const listener of this.audioListeners) listener({ kind: 'chunk', utteranceId, data });
-          } else {
-            console.warn('CascadeSessionController: dropping a binary audio frame received outside any tts.audio.start/tts.audio.end window.');
-          }
-          return;
-        }
-
-        let envelope: CascadeEnvelope;
-        try {
-          envelope = JSON.parse(event.data) as CascadeEnvelope;
-        } catch {
-          return; // A malformed control frame shouldn't take down the session.
-        }
-
-        // Fan out every envelope (transcript partials/finals included) to subscribers
-        // before this method's own handshake-specific handling below, so adapters see
-        // transcript events without this controller knowing their shape.
-        for (const listener of this.eventListeners) listener(envelope);
-
-        if (envelope.type === CascadeMessageType.SessionReady) {
-          if (settled) return; // A duplicate/late ready after the handshake already settled.
-          this.audioCapture = this.deps.createAudioCapture();
-          this.audioCapture
-            .start(stream, (chunk) => {
-              if (socket.readyState === WebSocket.OPEN) socket.send(chunk);
-            })
-            .then(settleResolve)
-            .catch((captureError: unknown) => {
-              settleReject(captureError instanceof Error ? captureError.message : 'Failed to start mic capture.');
-            });
-        } else if (envelope.type === CascadeMessageType.Error) {
-          const payload = envelope.payload as CascadeErrorPayload | undefined;
-          const message = payload?.message ?? 'The cascade server reported an error.';
-          if (!settled) {
-            // A failure before the handshake settled always fails start() outright —
-            // recoverable or not, there's no live session yet for a one-off notice to
-            // apply to.
-            settleReject(message);
-          } else if (payload?.recoverable === false) {
-            // Issue #12: this stage (or the session/transport itself) is now dead for
-            // the rest of the session — e.g. STT's one reopen attempt also failed.
-            this.handlePostConnectFailure(message);
-          } else {
-            // recoverable: true (or, defensively, a payload missing the field
-            // altogether) — one utterance's stage failed but the session keeps running
-            // exactly as before; surfaced as a notice instead of tearing the session
-            // down.
-            for (const listener of this.noticeListeners) {
-              listener({ message, utteranceId: payload?.utteranceId ?? null });
-            }
-          }
-        } else if (envelope.type === CascadeMessageType.TtsAudioStart) {
-          const payload = envelope.payload as CascadeTtsAudioStartPayload | undefined;
-          if (payload?.utteranceId) {
-            this.currentAudioUtteranceId = payload.utteranceId;
-            for (const listener of this.audioListeners) {
-              listener({ kind: 'start', utteranceId: payload.utteranceId, sampleRateHz: payload.sampleRateHz });
-            }
-          }
-        } else if (envelope.type === CascadeMessageType.TtsAudioEnd) {
-          const payload = envelope.payload as CascadeTtsAudioEndPayload | undefined;
-          if (payload?.utteranceId) {
-            // A stray/duplicate end for an utterance we're not currently
-            // inside the window of is ignored rather than clobbering
-            // whatever window (if any) is actually open.
-            if (this.currentAudioUtteranceId === payload.utteranceId) {
-              this.currentAudioUtteranceId = null;
-            }
-            for (const listener of this.audioListeners) listener({ kind: 'end', utteranceId: payload.utteranceId });
-          }
-        } else if (envelope.type === CascadeMessageType.Bargein) {
-          const payload = envelope.payload as CascadeBargeInPayload | undefined;
-          const supersededUtteranceIds = Array.isArray(payload?.supersededUtteranceIds)
-            ? payload.supersededUtteranceIds.filter((id): id is string => typeof id === 'string')
-            : [];
-          if (supersededUtteranceIds.length > 0) {
-            if (this.currentAudioUtteranceId && supersededUtteranceIds.includes(this.currentAudioUtteranceId)) {
-              // Closes the window now rather than waiting for tts.audio.end —
-              // the known benign race (issue #11) is that a barged-in
-              // utterance's tts.audio.end may never arrive at all, since the
-              // backend aborted mid-synthesis. Leaving the window open would
-              // misattribute every future binary frame (belonging to
-              // whatever utterance starts next) to this now-superseded id
-              // forever.
-              this.currentAudioUtteranceId = null;
-            }
-            for (const listener of this.audioListeners) {
-              listener({ kind: 'bargein', supersededUtteranceIds });
-            }
-          }
-        }
-      };
+      socket.onmessage = (event: MessageEvent) => this.handleSocketMessage(event, handshake);
 
       socket.onerror = () => {
         if (!settled) {
@@ -414,6 +334,127 @@ export class CascadeSessionController {
         }
       };
     });
+  }
+
+  /**
+   * Routes one raw WebSocket message. A binary frame is a raw PCM16LE TTS
+   * audio chunk (`binaryType` is `'arraybuffer'`, set in
+   * {@link connectAndStream}) — no envelope, no utteranceId of its own. Per
+   * the backend's framing contract (issue #7), it belongs to whichever
+   * utterance's `tts.audio.start`/`tts.audio.end` window we're currently
+   * inside; outside any such window there's no sound destination to
+   * associate it with, so it's dropped. A string frame is a JSON
+   * `{ v, type, payload }` control/event envelope: fanned out unfiltered to
+   * `subscribeToEvents` subscribers (transcript partials/finals included)
+   * before {@link handleEnvelope} applies this controller's own
+   * handshake/state-machine handling to it.
+   */
+  private handleSocketMessage(event: MessageEvent, handshake: CascadeHandshake): void {
+    if (typeof event.data !== 'string') {
+      const utteranceId = this.currentAudioUtteranceId;
+      if (utteranceId) {
+        const data = event.data as ArrayBuffer;
+        this.audioListeners.emit({ kind: 'chunk', utteranceId, data });
+      } else {
+        console.warn('CascadeSessionController: dropping a binary audio frame received outside any tts.audio.start/tts.audio.end window.');
+      }
+      return;
+    }
+
+    let envelope: CascadeEnvelope;
+    try {
+      envelope = JSON.parse(event.data) as CascadeEnvelope;
+    } catch {
+      return; // A malformed control frame shouldn't take down the session.
+    }
+
+    this.eventListeners.emit(envelope);
+    this.handleEnvelope(envelope, handshake);
+  }
+
+  /**
+   * Applies one JSON-parsed control/event envelope's effect on this
+   * controller's own state machine: completing the `session.ready` handshake
+   * and starting mic capture, handling pre-/post-handshake `error` envelopes
+   * (issue #12's recoverable-notice vs. fatal-failure split), and TTS audio
+   * window bookkeeping/fan-out (issue #7's start/chunk/end windowing, issue
+   * #11's barge-in). Everything `connectAndStream`'s `onmessage` used to do
+   * inline for a parsed envelope, pulled out so that method stays limited to
+   * socket setup and settlement wiring.
+   */
+  private handleEnvelope(envelope: CascadeEnvelope, handshake: CascadeHandshake): void {
+    const { stream, socket, isSettled, settleResolve, settleReject } = handshake;
+
+    if (envelope.type === CascadeMessageType.SessionReady) {
+      // A duplicate/late ready after the handshake already settled, or one
+      // arriving after a capture pipeline is already running (e.g. a
+      // duplicate `session.ready` sent before the first one's capture-start
+      // resolved), must not start a second capture pipeline alongside it.
+      if (isSettled() || this.audioCapture !== null) return;
+      this.audioCapture = this.deps.createAudioCapture();
+      this.audioCapture
+        .start(stream, (chunk) => {
+          if (socket.readyState === WebSocket.OPEN) socket.send(chunk);
+        })
+        .then(settleResolve)
+        .catch((captureError: unknown) => {
+          settleReject(captureError instanceof Error ? captureError.message : 'Failed to start mic capture.');
+        });
+    } else if (envelope.type === CascadeMessageType.Error) {
+      const payload = envelope.payload as CascadeErrorPayload | undefined;
+      const message = payload?.message ?? 'The cascade server reported an error.';
+      if (!isSettled()) {
+        // A failure before the handshake settled always fails start() outright —
+        // recoverable or not, there's no live session yet for a one-off notice to
+        // apply to.
+        settleReject(message);
+      } else if (payload?.recoverable === false) {
+        // Issue #12: this stage (or the session/transport itself) is now dead for
+        // the rest of the session — e.g. STT's one reopen attempt also failed.
+        this.handlePostConnectFailure(message);
+      } else {
+        // recoverable: true (or, defensively, a payload missing the field
+        // altogether) — one utterance's stage failed but the session keeps running
+        // exactly as before; surfaced as a notice instead of tearing the session
+        // down.
+        this.noticeListeners.emit({ message, utteranceId: payload?.utteranceId ?? null });
+      }
+    } else if (envelope.type === CascadeMessageType.TtsAudioStart) {
+      const payload = envelope.payload as CascadeTtsAudioStartPayload | undefined;
+      if (payload?.utteranceId) {
+        this.currentAudioUtteranceId = payload.utteranceId;
+        this.audioListeners.emit({ kind: 'start', utteranceId: payload.utteranceId, sampleRateHz: payload.sampleRateHz });
+      }
+    } else if (envelope.type === CascadeMessageType.TtsAudioEnd) {
+      const payload = envelope.payload as CascadeTtsAudioEndPayload | undefined;
+      if (payload?.utteranceId) {
+        // A stray/duplicate end for an utterance we're not currently
+        // inside the window of is ignored rather than clobbering
+        // whatever window (if any) is actually open.
+        if (this.currentAudioUtteranceId === payload.utteranceId) {
+          this.currentAudioUtteranceId = null;
+        }
+        this.audioListeners.emit({ kind: 'end', utteranceId: payload.utteranceId });
+      }
+    } else if (envelope.type === CascadeMessageType.Bargein) {
+      const payload = envelope.payload as CascadeBargeInPayload | undefined;
+      const supersededUtteranceIds = Array.isArray(payload?.supersededUtteranceIds)
+        ? payload.supersededUtteranceIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      if (supersededUtteranceIds.length > 0) {
+        if (this.currentAudioUtteranceId && supersededUtteranceIds.includes(this.currentAudioUtteranceId)) {
+          // Closes the window now rather than waiting for tts.audio.end —
+          // the known benign race (issue #11) is that a barged-in
+          // utterance's tts.audio.end may never arrive at all, since the
+          // backend aborted mid-synthesis. Leaving the window open would
+          // misattribute every future binary frame (belonging to
+          // whatever utterance starts next) to this now-superseded id
+          // forever.
+          this.currentAudioUtteranceId = null;
+        }
+        this.audioListeners.emit({ kind: 'bargein', supersededUtteranceIds });
+      }
+    }
   }
 
   /**

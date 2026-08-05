@@ -5,7 +5,8 @@ import { mapCascadeEventToTranscriptUpdate } from '../cascade/cascadeTranscriptA
 import { CascadeLatencyTracker } from '../latency/cascadeLatencyAdapter';
 import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
-import { prefixId, prefixUtteranceId, type InterpreterSession, type SessionNotice, type SessionState } from './InterpreterSession';
+import { prefixLatencyReport, prefixUtteranceId, type InterpreterSession, type SessionNotice, type SessionState } from './InterpreterSession';
+import { ListenerSet } from './listenerSet';
 
 /**
  * Thin adapter presenting {@link CascadeSessionController} as an
@@ -38,7 +39,7 @@ export class CascadeInterpreterSession implements InterpreterSession {
   private readonly controller: CascadeSessionController;
   private readonly playbackQueue: AudioPlaybackQueue;
   private readonly latencyTracker: CascadeLatencyTracker;
-  private readonly latencyListeners = new Set<(report: LatencyReport) => void>();
+  private readonly latencyListeners = new ListenerSet<LatencyReport>();
   /** Mints a fresh id per notice (issue #12) so `SessionPanel` can tell a new one apart from an already-dismissed one — see `SessionNotice`'s remarks. */
   private noticeSeq = 0;
 
@@ -60,8 +61,7 @@ export class CascadeInterpreterSession implements InterpreterSession {
   /** Namespaces a report's utteranceId (see `prefixId`'s remarks) and fans it out, unless the tracker had nothing to report (e.g. a non-latency envelope). */
   private emitLatencyReport(report: LatencyReport | null): void {
     if (!report) return;
-    const prefixed = { ...report, utteranceId: prefixId(this.mode, report.utteranceId) };
-    for (const listener of this.latencyListeners) listener(prefixed);
+    this.latencyListeners.emit(prefixLatencyReport(this.mode, report));
   }
 
   getState(): SessionState {
@@ -80,10 +80,7 @@ export class CascadeInterpreterSession implements InterpreterSession {
   }
 
   subscribeToLatency(listener: (report: LatencyReport) => void): () => void {
-    this.latencyListeners.add(listener);
-    return () => {
-      this.latencyListeners.delete(listener);
-    };
+    return this.latencyListeners.add(listener);
   }
 
   /**

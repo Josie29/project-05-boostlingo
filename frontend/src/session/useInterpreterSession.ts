@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import type { LanguagePair } from '../api';
 import { latencyReducer, selectLatencyAverages, selectRecentReports } from '../latency/latencyReducer';
 import { INITIAL_LATENCY_STATE, type LatencyReport, type LatencySessionAverages, type LatencyState } from '../latency/types';
@@ -136,10 +136,16 @@ export function useInterpreterSession(
 
   const activeSession = activeSessions[mode];
 
-  const state = useSyncExternalStore(
-    (onStoreChange) => activeSession.subscribe(() => onStoreChange()),
-    () => activeSession.getState(),
+  // Memoized (keyed on the active session, the only thing it closes over
+  // that ever actually changes) so useSyncExternalStore sees a stable
+  // `subscribe` reference across re-renders — otherwise it treats every
+  // render as a potentially-different store and tears down/re-subscribes on
+  // each one instead of only when the transport itself changes.
+  const subscribeToActiveSession = useCallback(
+    (onStoreChange: () => void) => activeSession.subscribe(() => onStoreChange()),
+    [activeSession],
   );
+  const state = useSyncExternalStore(subscribeToActiveSession, () => activeSession.getState());
 
   const [transcriptState, dispatchTranscript] = useReducer(reduceTranscript, INITIAL_TRANSCRIPT_STATE);
   const [latencyState, dispatchLatency] = useReducer(reduceLatency, INITIAL_LATENCY_STATE);
@@ -193,6 +199,14 @@ export function useInterpreterSession(
     void next.start(pairRef.current).finally(() => setSwitching(false));
   }
 
+  // Keyed on latencyState so these only recompute when a new report actually
+  // lands, rather than deriving a fresh array/object (and so a fresh
+  // reference) on every render regardless of whether latencyState changed —
+  // which would otherwise defeat any downstream `React.memo`/dependency
+  // array keyed on these values.
+  const latencyReports = useMemo(() => selectRecentReports(latencyState), [latencyState]);
+  const latencyAverages = useMemo(() => selectLatencyAverages(latencyState), [latencyState]);
+
   return {
     mode,
     status: state.status,
@@ -201,8 +215,8 @@ export function useInterpreterSession(
     reconnectable: state.reconnectable,
     switching,
     transcriptEntries: transcriptState.entries,
-    latencyReports: selectRecentReports(latencyState),
-    latencyAverages: selectLatencyAverages(latencyState),
+    latencyReports,
+    latencyAverages,
     notice,
     setMode,
     start: () => {

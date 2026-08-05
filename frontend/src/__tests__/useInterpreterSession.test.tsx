@@ -346,6 +346,49 @@ describe('useInterpreterSession', () => {
     ]);
   });
 
+  // Catches a resubscribe-on-every-render bug: the function handed to
+  // useSyncExternalStore must stay referentially stable across re-renders of
+  // the same active session, or React tears down and re-establishes the
+  // subscription on every render instead of only when the active transport
+  // itself actually changes (e.g. a mode switch).
+  it('does not resubscribe to the active session on every re-render', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const subscribeSpy = vi.spyOn(realtimeSession, 'subscribe');
+    const { rerender } = renderHook(() => useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }));
+    const subscribeCallsAfterMount = subscribeSpy.mock.calls.length;
+
+    rerender();
+    rerender();
+
+    expect(subscribeSpy.mock.calls.length).toBe(subscribeCallsAfterMount);
+  });
+
+  // Catches a derive-fresh-value-every-render bug: latencyReports/
+  // latencyAverages must keep the same array/object reference across a
+  // re-render that doesn't add a new latency report, or every consumer
+  // keyed on referential equality (e.g. a memoized child, a dependency
+  // array) would re-render/re-run for no reason on every unrelated update.
+  it('keeps stable latencyReports/latencyAverages references across a re-render with no new report', () => {
+    const callOrder: string[] = [];
+    const realtimeSession = createInstantFakeSession('realtime', callOrder);
+    const cascadeSession = createInstantFakeSession('cascade', callOrder);
+    const { result, rerender } = renderHook(() =>
+      useInterpreterSession(PAIR, { realtime: realtimeSession, cascade: cascadeSession }),
+    );
+
+    act(() => result.current.start());
+    act(() => realtimeSession.emitLatency({ utteranceId: 'realtime:turn-1', stages: [], endToEndMs: 1_200 }));
+    const firstReports = result.current.latencyReports;
+    const firstAverages = result.current.latencyAverages;
+
+    rerender();
+
+    expect(result.current.latencyReports).toBe(firstReports);
+    expect(result.current.latencyAverages).toBe(firstAverages);
+  });
+
   // Catches a stale-notice bug: reconnecting from a mid-session death should clear
   // whatever notice was showing beforehand, the same way a fresh start() does — an
   // old per-stage notice lingering past a Reconnect would misleadingly suggest it's

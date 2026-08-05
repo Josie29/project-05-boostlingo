@@ -21,6 +21,18 @@ const MODE_LABEL: Record<SessionMode, string> = {
 const MODES: SessionMode[] = ['realtime', 'cascade'];
 
 /**
+ * Perceived-latency targets from the brief, keyed by mode. `LatencyPanel`
+ * itself is mode-agnostic (it just renders whatever `benchmarkMs` it's
+ * given) — this mode->benchmark mapping lives here instead, since
+ * `SessionPanel` is the one component in the tree already sanctioned to
+ * know `SessionMode` has two values (see `MODE_LABEL` above).
+ */
+const BENCHMARK_HINT_MS: Record<SessionMode, number> = {
+  realtime: 1_500,
+  cascade: 3_000,
+};
+
+/**
  * Step-by-step guidance shown alongside the plain error message for the two
  * mic-specific failures (issue #12) — generic enough to hold across
  * browsers, since the exact wording/location of a site's mic permission
@@ -156,7 +168,7 @@ export function SessionPanel({
 
       <div className="session-panel__panels">
         <TranscriptPanel entries={transcriptEntries} />
-        <LatencyPanel mode={mode} recentReports={latencyReports} averages={latencyAverages} />
+        <LatencyPanel benchmarkMs={BENCHMARK_HINT_MS[mode]} recentReports={latencyReports} averages={latencyAverages} />
       </div>
     </section>
   );

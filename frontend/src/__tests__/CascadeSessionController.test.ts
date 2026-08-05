@@ -213,6 +213,33 @@ describe('CascadeSessionController', () => {
     expect(controller.getState().status).toBe('connected');
   });
 
+  // Catches a leaked-capture-pipeline bug: a duplicate/late session.ready
+  // arriving before the first one's capture-start promise has resolved
+  // (so the handshake hasn't settled yet, and the earlier "already settled"
+  // guard alone doesn't catch it) must not start a second capture pipeline
+  // alongside the one already starting — two pipelines both streaming mic
+  // audio over the same socket would double every chunk sent.
+  it('does not start a second capture pipeline on a duplicate session.ready received before the first capture-start settles', async () => {
+    const ws = fakeWebSocket();
+    const { capture } = fakeAudioCapture();
+    const deps = buildDeps({ createWebSocket: vi.fn(() => toWebSocket(ws)), createAudioCapture: vi.fn(() => capture) });
+    const controller = new CascadeSessionController(deps);
+
+    const startPromise = controller.start();
+    await waitForSocketReady(ws);
+    ws.readyState = WebSocket.OPEN;
+    ws.onopen?.();
+
+    const readyMessage = {
+      data: JSON.stringify({ v: 1, type: 'session.ready', payload: { sampleRateHz: 24000, encoding: 'pcm16', channels: 1 } }),
+    };
+    ws.onmessage?.(readyMessage);
+    ws.onmessage?.(readyMessage); // duplicate, dispatched before the first capture.start() promise has had a chance to resolve
+    await startPromise;
+
+    expect(capture.start).toHaveBeenCalledOnce();
+  });
+
   it('sends every chunk the audio capture produces once connected', async () => {
     const ws = fakeWebSocket();
     const { capture, emitChunk } = fakeAudioCapture();

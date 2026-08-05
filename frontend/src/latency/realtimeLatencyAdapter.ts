@@ -40,10 +40,20 @@ export class RealtimeLatencyTracker {
   private pendingSpeechStoppedAtMs: number | null = null;
   private turnCounter = 0;
 
-  /** Clears any pending `speech_stopped` anchor and turn count, for a fresh session. */
+  /**
+   * Clears any pending `speech_stopped` anchor, for a fresh session.
+   *
+   * Deliberately does *not* reset `turnCounter`: `useInterpreterSession`
+   * intentionally preserves latency history across reconnects and
+   * mode-switches, and `LatencyReport.utteranceId` values are threaded
+   * through a mode-prefixing step upstream that only de-dupes *within* a
+   * mode, not across a `reset()` call. If the counter restarted at 0 here,
+   * a post-reset `turn-1` would collide with the pre-reset `turn-1` still
+   * sitting in that preserved history, and the latency reducer would treat
+   * the new turn as an update to the old report instead of a new one.
+   */
   reset(): void {
     this.pendingSpeechStoppedAtMs = null;
-    this.turnCounter = 0;
   }
 
   /**

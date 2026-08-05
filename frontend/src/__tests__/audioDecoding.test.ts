@@ -58,4 +58,13 @@ describe('pcm16LeToFloat32', () => {
     const output = pcm16LeToFloat32(new ArrayBuffer(20));
     expect(output.length).toBe(10);
   });
+
+  // Catches a crash bug: an odd-length buffer (a malformed/truncated frame)
+  // must decode its whole-sample prefix rather than throwing when
+  // constructing the Float32Array with a fractional length — a single bad
+  // frame off the wire shouldn't take down the whole playback pipeline.
+  it('drops a trailing odd byte instead of throwing on an odd-length buffer', () => {
+    const output = pcm16LeToFloat32(new ArrayBuffer(5));
+    expect(output.length).toBe(2);
+  });
 });

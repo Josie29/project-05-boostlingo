@@ -32,9 +32,11 @@ interface FakeBuffer {
 interface FakeAudioContext {
   currentTime: number;
   destination: object;
+  state: AudioContextState;
   createBuffer: ReturnType<typeof vi.fn>;
   createBufferSource: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  resume: ReturnType<typeof vi.fn>;
 }
 
 function toAudioContext(ctx: FakeAudioContext): AudioContext {
@@ -47,13 +49,14 @@ function toAudioContext(ctx: FakeAudioContext): AudioContext {
  * Web Audio API. `createBufferSource()` records every source it creates so
  * tests can assert on the exact `start(when)` time each was scheduled at.
  */
-function fakeAudioContext(startingCurrentTime = 0) {
+function fakeAudioContext(startingCurrentTime = 0, startingState: AudioContextState = 'running') {
   const sources: FakeSource[] = [];
   const buffers: FakeBuffer[] = [];
 
   const ctx: FakeAudioContext = {
     currentTime: startingCurrentTime,
     destination: {},
+    state: startingState,
     createBuffer: vi.fn((numberOfChannels: number, length: number, sampleRate: number): FakeBuffer => {
       const buffer: FakeBuffer = { numberOfChannels, length, sampleRate, duration: length / sampleRate, copyToChannel: vi.fn() };
       buffers.push(buffer);
@@ -71,7 +74,12 @@ function fakeAudioContext(startingCurrentTime = 0) {
       sources.push(source);
       return source;
     }),
-    close: vi.fn(async () => {}),
+    close: vi.fn(async () => {
+      ctx.state = 'closed';
+    }),
+    resume: vi.fn(async () => {
+      ctx.state = 'running';
+    }),
   };
 
   return { ctx, sources, buffers };
@@ -254,6 +262,36 @@ describe('AudioPlaybackQueue', () => {
     await expect(queue.stop()).resolves.toBeUndefined();
   });
 
+  // Catches a double-close crash: two stop() calls racing (e.g. a barge-in
+  // cleanup path and an explicit session teardown) must not both try to
+  // close the same AudioContext — the real Web Audio API throws on a second
+  // close(), which without guarding surfaces as an unhandled promise
+  // rejection since nothing awaits the loser of the race.
+  it('does not close the AudioContext twice when stop() is called concurrently', async () => {
+    const { queue, ctx } = buildQueue();
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+    await Promise.all([queue.stop(), queue.stop()]);
+
+    expect(ctx.close).toHaveBeenCalledOnce();
+  });
+
+  // Catches a silent-audio bug: an AudioContext created outside a
+  // user-activation window (e.g. the first TTS chunk of a session arriving
+  // asynchronously, off the click/tap that started it) can come up
+  // suspended, in which case nothing scheduled against it is ever actually
+  // audible until something resumes it.
+  it('resumes the AudioContext if it comes up suspended', () => {
+    const { ctx: rawCtx } = fakeAudioContext(0, 'suspended');
+    const queue = new AudioPlaybackQueue({ createAudioContext: () => toAudioContext(rawCtx) });
+
+    queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+    queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+    expect(rawCtx.resume).toHaveBeenCalled();
+  });
+
   describe('flush (issue #11 barge-in)', () => {
     // Catches the core barge-in playback bug: if a superseded utterance's
     // already-scheduled chunks kept playing after a bargein envelope, the
@@ -308,16 +346,31 @@ describe('AudioPlaybackQueue', () => {
       expect(ctx.close).not.toHaveBeenCalled();
     });
 
-    // Catches an over-eager-flush bug: a bargein envelope naming ids this
-    // queue never scheduled anything for (e.g. queued-but-unstarted phrases
-    // the backend dropped before ever calling the TTS provider) must not
-    // touch whatever this queue *is* currently playing.
-    it('is a no-op when the currently-playing utterance is not among the superseded ids', () => {
+    // Catches a regression back toward the old, narrower behavior: a real
+    // barge-in (non-empty supersededUtteranceIds) must stop whatever this
+    // queue currently has scheduled even if none of the named ids happen to
+    // match this queue's own bookkeeping of "currently playing." Everything
+    // scheduled in a given queue by the time any barge-in arrives predates
+    // it by definition, so matching ids is not a precondition for flushing.
+    it('stops the currently-playing utterance even when it is not itself named in supersededUtteranceIds', () => {
       const { queue, sources } = buildQueue();
       queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
       queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
 
       queue.flush(['some-other-utterance']);
+
+      expect(sources[0].stop).toHaveBeenCalledOnce();
+    });
+
+    // Catches the no-real-barge-in case: an empty supersededUtteranceIds
+    // list (nothing was actually superseded) must not touch anything
+    // currently scheduled.
+    it('is a no-op when supersededUtteranceIds is empty', () => {
+      const { queue, sources } = buildQueue();
+      queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
+      queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
+
+      queue.flush([]);
 
       expect(sources[0].stop).not.toHaveBeenCalled();
     });
@@ -347,21 +400,23 @@ describe('AudioPlaybackQueue', () => {
       expect(ctx.close).not.toHaveBeenCalled();
     });
 
-    // Catches a stale-window bug: once an utterance's 'end' event closes its
-    // window normally (it finished playing on its own, no barge-in), a later
-    // barge-in that happens to still name that same id (a race between the
-    // aggregated bargein envelope and this utterance's own natural
-    // completion) must not reach back and flip an already-finished
-    // utterance's bookkeeping.
-    it('is a no-op for an utterance whose window already closed via a natural end event', () => {
+    // Catches the exact stale-audio bug this fix addresses: the backend only
+    // lists still-*pending* utterances in a bargein envelope, so an
+    // utterance whose 'end' event already arrived (its window closed
+    // normally on the frontend) never appears in supersededUtteranceIds —
+    // yet its tail chunks can still be scheduled and audibly playing when
+    // the barge-in happens, since audio scheduling runs ahead of the event
+    // stream. If flush() still no-op'd here (the old, buggy behavior), that
+    // stale audio would keep talking over the caller after they interrupted.
+    it('still silences already-scheduled tail audio for an utterance whose window already closed via a natural end event', () => {
       const { queue, sources } = buildQueue();
       queue.handleEvent({ kind: 'start', utteranceId: 'u1', sampleRateHz: 24_000 });
       queue.handleEvent({ kind: 'chunk', utteranceId: 'u1', data: pcmChunkOf(24_000) });
       queue.handleEvent({ kind: 'end', utteranceId: 'u1' });
 
-      queue.flush(['u1']);
+      queue.flush(['u2']);
 
-      expect(sources[0].stop).not.toHaveBeenCalled();
+      expect(sources[0].stop).toHaveBeenCalledOnce();
     });
   });
 

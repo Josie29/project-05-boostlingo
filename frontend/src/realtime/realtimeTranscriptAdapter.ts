@@ -5,9 +5,9 @@ import type { TranscriptUpdate } from '../transcript/types';
  * channel into the mode-agnostic {@link TranscriptUpdate} shape the shared
  * transcript reducer/panel understand. Keeping this parsing here — instead
  * of in the reducer or `TranscriptPanel` — is what keeps those two
- * Realtime-free, so the future cascade pipeline (issue #5) can feed them
- * from its own adapter without either shared piece knowing OpenAI's wire
- * format exists.
+ * Realtime-free, so the cascade pipeline can feed them from its own adapter
+ * (`cascadeTranscriptAdapter.ts`) without either shared piece knowing
+ * OpenAI's wire format exists.
  *
  * Event names/fields follow OpenAI's Realtime API for `gpt-realtime`
  * sessions. The `response.audio_transcript.*` variants (singular, no

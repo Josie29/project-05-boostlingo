@@ -103,6 +103,27 @@ describe('createRealtimeSession', () => {
 
     expect(fetchMock).toHaveBeenCalledWith('/api/realtime/session', { method: 'POST' });
   });
+
+  // Catches a masked-crash bug: a malformed 2xx body (e.g. a proxy returning
+  // an empty/non-JSON success response) must surface as a thrown error here,
+  // not get silently swallowed into a bogus `{}` result — a caller sending
+  // `Bearer undefined` to OpenAI as a result would fail confusingly much
+  // later and far from the actual cause. Only an *error* body's JSON parse
+  // failure should be tolerated, since that path already has its own
+  // status-code fallback message.
+  it('propagates a JSON parse failure on an ok response instead of masking it into an empty result', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => {
+          throw new Error('Unexpected end of JSON input');
+        },
+      }),
+    );
+
+    await expect(createRealtimeSession()).rejects.toThrow('Unexpected end of JSON input');
+  });
 });
 
 describe('getLanguages', () => {

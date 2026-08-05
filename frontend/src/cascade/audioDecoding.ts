@@ -18,12 +18,12 @@
  * to exactly -1 and 32767 back to exactly 1, rather than introducing a
  * rounding bias at either end of the range.
  *
- * @param input An ArrayBuffer of raw PCM16LE bytes (even length; each pair
- *   of bytes is one sample).
- * @returns A new Float32Array of `input.byteLength / 2` samples.
+ * @param input An ArrayBuffer of raw PCM16LE bytes, normally an even length
+ *   (each pair of bytes is one sample) — see below for the odd-length case.
+ * @returns A new Float32Array of `Math.floor(input.byteLength / 2)` samples.
  */
 export function pcm16LeToFloat32(input: ArrayBuffer): Float32Array<ArrayBuffer> {
-  const sampleCount = input.byteLength / 2;
+  const sampleCount = input.byteLength >> 1; // Floor-divide by 2 (bit shift) — drops an odd trailing byte of a malformed frame instead of producing a fractional length the Float32Array constructor below would throw on.
   const view = new DataView(input);
   const output = new Float32Array(sampleCount);
 
