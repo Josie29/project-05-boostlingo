@@ -177,6 +177,62 @@ export interface ConversationListing {
   wer: number | null;
   realtimeEndToEndMedianMs: number | null;
   cascadeEndToEndMedianMs: number | null;
+  baseline: boolean;
+}
+
+/** Median/p95 over one population of durations, per the summary endpoint. */
+export interface LatencyStatsInfo {
+  count: number;
+  medianMs: number;
+  p95Ms: number;
+}
+
+/** One (mode, MT provider) group of the cross-conversation summary. */
+export interface SummaryGroup {
+  mode: 'realtime' | 'cascade';
+  translationProvider: string | null;
+  conversationCount: number;
+  utteranceCount: number;
+  endToEnd: LatencyStatsInfo | null;
+  stages: { stage: string; stats: LatencyStatsInfo }[];
+}
+
+/** Which conversations a summary draws from — the progress pane diffs baseline vs current. */
+export type SummaryScope = 'all' | 'baseline' | 'current';
+
+/**
+ * Fetches the cross-conversation latency summary.
+ *
+ * @param scope - Which conversations contribute; defaults to all.
+ * @param group - `'mode'` merges cascade's MT providers into one group (stats
+ *   computed over the merged population server-side); omitted keeps the
+ *   per-provider grouping.
+ * @returns Per-group latency statistics.
+ * @throws {Error} If the network request fails or the response is not ok.
+ */
+export async function getSummary(scope: SummaryScope = 'all', group?: 'mode'): Promise<{ groups: SummaryGroup[] }> {
+  const response = await fetch(`/api/metrics/summary?scope=${scope}${group ? `&group=${group}` : ''}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch summary (status ${response.status})`);
+  }
+  return (await response.json()) as { groups: SummaryGroup[] };
+}
+
+/**
+ * Pins the given conversations as the baseline set, replacing any previous set.
+ *
+ * @param conversationIds - The new baseline set; empty unpins everything.
+ * @throws {Error} If the network request fails or the backend rejects it.
+ */
+export async function pinBaseline(conversationIds: string[]): Promise<void> {
+  const response = await fetch('/api/metrics/baseline', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversationIds }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to pin baseline (status ${response.status})`);
+  }
 }
 
 /**

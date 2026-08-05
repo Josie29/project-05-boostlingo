@@ -112,6 +112,33 @@ public class MetricsEndpointsTests : IDisposable
     }
 
     /// <summary>
+    /// Catches the progress pane's whole loop breaking over the wire: pinning a
+    /// baseline must mark the listing row and scope the summary; an unknown scope
+    /// value must 400 rather than silently returning everything.
+    /// </summary>
+    [Fact]
+    public async Task BaselinePin_MarksListing_AndScopesSummary()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+        await client.PostAsJsonAsync(MetricsEndpoints.ConversationsRoute, SamplePayload);
+
+        var pin = await client.PostAsJsonAsync(MetricsEndpoints.BaselineRoute, new { conversationIds = new[] { "conv-http-1" } });
+        Assert.Equal(HttpStatusCode.NoContent, pin.StatusCode);
+
+        var listing = await client.GetFromJsonAsync<JsonElement>(MetricsEndpoints.ConversationsRoute);
+        Assert.True(Assert.Single(listing.GetProperty("conversations").EnumerateArray()).GetProperty("baseline").GetBoolean());
+
+        var baseline = await client.GetFromJsonAsync<JsonElement>($"{MetricsEndpoints.SummaryRoute}?scope=baseline");
+        Assert.Equal(2, baseline.GetProperty("groups").EnumerateArray().Count());
+        var current = await client.GetFromJsonAsync<JsonElement>($"{MetricsEndpoints.SummaryRoute}?scope=current");
+        Assert.Empty(current.GetProperty("groups").EnumerateArray());
+
+        var invalid = await client.GetAsync($"{MetricsEndpoints.SummaryRoute}?scope=recent");
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+    }
+
+    /// <summary>
     /// Catches a benchmark session recorded before any data exists rendering a broken
     /// dashboard: the query endpoints must return well-formed empty shapes, not errors,
     /// when nothing has been captured yet.

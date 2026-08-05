@@ -32,6 +32,22 @@ public interface ISessionMetricsStore
     /// the numbers <c>docs/benchmarks.md</c>'s result tables are filled from.
     /// </summary>
     /// <param name="cancellationToken">Cancels the query.</param>
+    /// <param name="scope">Which conversations contribute (Lab P2); defaults to all.</param>
+    /// <param name="collapseMtProvider">When <c>true</c>, cascade groups merge across
+    /// MT providers (stats over the merged population — medians can't be combined
+    /// after the fact). The progress pane uses this: provider is a variable there,
+    /// not a comparison point.</param>
     /// <returns>The summary; <see cref="MetricsSummary.Groups"/> is empty when nothing is stored yet.</returns>
-    Task<MetricsSummary> GetSummaryAsync(CancellationToken cancellationToken);
+    Task<MetricsSummary> GetSummaryAsync(
+        CancellationToken cancellationToken, BaselineScope scope = BaselineScope.All, bool collapseMtProvider = false);
+
+    /// <summary>
+    /// Pins the given conversations as THE baseline set (Lab P2), replacing any
+    /// previously pinned set wholesale - one baseline at a time, re-pin freely.
+    /// Unknown ids are ignored rather than erroring: a stale Lab view pinning a
+    /// just-deleted conversation shouldn't fail the whole pin.
+    /// </summary>
+    /// <param name="conversationIds">Conversations forming the new baseline set.</param>
+    /// <param name="cancellationToken">Cancels the update.</param>
+    Task SetBaselineAsync(IReadOnlyList<string> conversationIds, CancellationToken cancellationToken);
 }

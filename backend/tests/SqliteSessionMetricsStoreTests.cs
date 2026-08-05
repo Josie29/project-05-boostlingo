@@ -85,6 +85,71 @@ public class SqliteSessionMetricsStoreTests : IDisposable
     }
 
     /// <summary>
+    /// Catches the progress pane splitting cascade by MT provider: with
+    /// collapseMtProvider the two providers' populations must merge into ONE cascade
+    /// group whose stats span both — not an average of their separate medians.
+    /// </summary>
+    [Fact]
+    public async Task Summary_CollapsingProviders_MergesCascadeIntoOneGroup()
+    {
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        await store.SaveConversationAsync(SampleReport("conv-openai"), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SaveConversationAsync(SampleReport("conv-anthropic"), "anthropic", "gpt-4o-mini-transcribe", CancellationToken.None);
+
+        var summary = await store.GetSummaryAsync(CancellationToken.None, collapseMtProvider: true);
+
+        var cascade = Assert.Single(summary.Groups, group => group.Mode == InterpreterMode.Cascade);
+        Assert.Null(cascade.TranslationProvider);
+        Assert.Equal(2, cascade.UtteranceCount);
+        Assert.Equal(2, cascade.EndToEnd!.Count);
+    }
+
+    /// <summary>
+    /// Catches the progress pane comparing a baseline against itself: pinning must
+    /// replace the previous set wholesale, and each scope must draw from only its own
+    /// conversations.
+    /// </summary>
+    [Fact]
+    public async Task Baseline_PinReplacesPreviousSet_AndScopesSummaries()
+    {
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        await store.SaveConversationAsync(SampleReport("conv-early"), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        var later = SampleReport("conv-later") with
+        {
+            Utterances = [new UtteranceMetricsRecord("cascade:x", InterpreterMode.Cascade, 1000, [])],
+        };
+        await store.SaveConversationAsync(later, "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+
+        await store.SetBaselineAsync(["conv-early"], CancellationToken.None);
+        await store.SetBaselineAsync(["conv-later"], CancellationToken.None);
+
+        var listings = await store.ListConversationsAsync(CancellationToken.None);
+        Assert.True(Assert.Single(listings, listing => listing.ConversationId == "conv-later").Baseline);
+        Assert.False(Assert.Single(listings, listing => listing.ConversationId == "conv-early").Baseline);
+
+        var baseline = await store.GetSummaryAsync(CancellationToken.None, BaselineScope.Baseline);
+        var current = await store.GetSummaryAsync(CancellationToken.None, BaselineScope.Current);
+        Assert.Equal(1000, Assert.Single(baseline.Groups, group => group.Mode == InterpreterMode.Cascade).EndToEnd!.MedianMs);
+        Assert.Equal(1800, Assert.Single(current.Groups, group => group.Mode == InterpreterMode.Cascade).EndToEnd!.MedianMs);
+    }
+
+    /// <summary>
+    /// Catches a double-Stop re-post silently unpinning a baseline conversation: the
+    /// upsert's delete-and-reinsert must preserve the baseline flag.
+    /// </summary>
+    [Fact]
+    public async Task ResavingBaselineConversation_KeepsItPinned()
+    {
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+        await store.SetBaselineAsync(["conv-1"], CancellationToken.None);
+
+        await store.SaveConversationAsync(SampleReport(), "openai", "gpt-4o-mini-transcribe", CancellationToken.None);
+
+        Assert.True(Assert.Single(await store.ListConversationsAsync(CancellationToken.None)).Baseline);
+    }
+
+    /// <summary>
     /// Catches an upgrade wiping or breaking a database captured before the Lab
     /// columns existed: opening an old-schema file must add the new columns in place,
     /// keep its rows, and default them to the pre-Lab reality (default STT, live).

@@ -189,6 +189,116 @@
   cursor: not-allowed;
 }
 
+.lab-panel__sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.lab-panel__progress {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+}
+
+@media (min-width: 40rem) {
+  .lab-panel__progress {
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  }
+}
+
+.lab-panel__progress-card {
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.lab-panel__progress-name {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.lab-panel__progress-card[data-mode='realtime'] .lab-panel__progress-name {
+  color: var(--color-mode-realtime);
+}
+
+.lab-panel__progress-card[data-mode='cascade'] .lab-panel__progress-name {
+  color: var(--color-mode-cascade);
+}
+
+.lab-panel__progress-total {
+  font-size: 1.125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.lab-panel__progress-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.8125rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.lab-panel__delta-down {
+  color: var(--color-success);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.lab-panel__delta-up {
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.lab-panel__delta-flat {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.lab-panel__pin {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.05em;
+  padding: 0.125rem var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.lab-panel__pin[aria-pressed='true'] {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.lab-panel__pin[aria-pressed='true'][data-mode='realtime'] {
+  color: var(--color-mode-realtime);
+  border-color: var(--color-mode-realtime);
+}
+
+.lab-panel__pin[aria-pressed='true'][data-mode='cascade'] {
+  color: var(--color-mode-cascade);
+  border-color: var(--color-mode-cascade);
+}
+
 .lab-panel {
   display: flex;
   flex-direction: column;

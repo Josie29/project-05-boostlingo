@@ -141,6 +141,7 @@ public sealed record TranscriptEntryRecord(
 /// <param name="Wer">Word Error Rate for fixture runs, or <c>null</c> for live sessions (no ground truth).</param>
 /// <param name="RealtimeEndToEndMedianMs">Median realtime end-to-end, or <c>null</c> with no completed realtime utterances.</param>
 /// <param name="CascadeEndToEndMedianMs">Median cascade end-to-end, or <c>null</c> with no completed cascade utterances.</param>
+/// <param name="Baseline">Whether this conversation is in the pinned baseline set (Lab P2).</param>
 public sealed record ConversationListing(
     string ConversationId,
     string SourceLang,
@@ -154,7 +155,25 @@ public sealed record ConversationListing(
     string Kind,
     double? Wer,
     double? RealtimeEndToEndMedianMs,
-    double? CascadeEndToEndMedianMs);
+    double? CascadeEndToEndMedianMs,
+    bool Baseline);
+
+/// <summary>
+/// Which conversations a summary draws from (Lab P2): everything, only the pinned
+/// baseline set, or only what came after it. The progress pane diffs
+/// <see cref="Baseline"/> against <see cref="Current"/>.
+/// </summary>
+public enum BaselineScope
+{
+    /// <summary>Every stored conversation — the pre-P2 behavior and the default.</summary>
+    All,
+
+    /// <summary>Only conversations in the pinned baseline set.</summary>
+    Baseline,
+
+    /// <summary>Only conversations outside the pinned baseline set.</summary>
+    Current,
+}
 
 /// <summary>
 /// Cross-session latency statistics, grouped exactly the way <c>docs/benchmarks.md</c>'s

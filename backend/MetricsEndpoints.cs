@@ -13,6 +13,9 @@ public static class MetricsEndpoints
     /// <summary>Route for the cross-conversation latency summary.</summary>
     public const string SummaryRoute = "/api/metrics/summary";
 
+    /// <summary>Route for pinning the baseline conversation set (Lab P2).</summary>
+    public const string BaselineRoute = "/api/metrics/baseline";
+
     /// <summary>Registers the metrics endpoints.</summary>
     /// <param name="app">The application to add the endpoints to.</param>
     /// <returns>The same application, for chaining.</returns>
@@ -21,6 +24,7 @@ public static class MetricsEndpoints
         app.MapPost(ConversationsRoute, HandleSaveConversation);
         app.MapGet(ConversationsRoute, HandleListConversations);
         app.MapGet(SummaryRoute, HandleGetSummary);
+        app.MapPost(BaselineRoute, HandleSetBaseline);
         return app;
     }
 
@@ -79,11 +83,59 @@ public static class MetricsEndpoints
         ISessionMetricsStore store, CancellationToken cancellationToken) =>
         Results.Ok(new ConversationListResponse(await store.ListConversationsAsync(cancellationToken)));
 
-    /// <summary>Returns the cross-conversation latency summary, grouped per (mode, MT provider).</summary>
+    /// <summary>
+    /// Returns the cross-conversation latency summary, grouped per (mode, MT
+    /// provider). <c>?scope=baseline|current</c> narrows to the pinned baseline set
+    /// or everything after it (Lab P2); omitted means all — the pre-P2 behavior.
+    /// <c>?group=mode</c> merges cascade's MT providers into one group (the progress
+    /// pane's view: provider is a variable there, not a comparison point).
+    /// </summary>
     private static async Task<IResult> HandleGetSummary(
-        ISessionMetricsStore store, CancellationToken cancellationToken) =>
-        Results.Ok(await store.GetSummaryAsync(cancellationToken));
+        string? scope, string? group, ISessionMetricsStore store, CancellationToken cancellationToken)
+    {
+        BaselineScope? parsed = scope?.ToLowerInvariant() switch
+        {
+            null or "all" => BaselineScope.All,
+            "baseline" => BaselineScope.Baseline,
+            "current" => BaselineScope.Current,
+            _ => null,
+        };
+        if (parsed is null)
+        {
+            return Results.BadRequest(new MetricsErrorResponse($"Unknown scope '{scope}'. Valid values: all, baseline, current."));
+        }
+
+        bool? collapse = group?.ToLowerInvariant() switch
+        {
+            null or "provider" => false,
+            "mode" => true,
+            _ => null,
+        };
+        if (collapse is null)
+        {
+            return Results.BadRequest(new MetricsErrorResponse($"Unknown group '{group}'. Valid values: provider, mode."));
+        }
+
+        return Results.Ok(await store.GetSummaryAsync(cancellationToken, parsed.Value, collapse.Value));
+    }
+
+    /// <summary>Pins the posted conversations as the baseline set, replacing any previous set.</summary>
+    private static async Task<IResult> HandleSetBaseline(
+        BaselineRequest request, ISessionMetricsStore store, CancellationToken cancellationToken)
+    {
+        if (request.ConversationIds is null)
+        {
+            return Results.BadRequest(new MetricsErrorResponse("conversationIds is required (may be empty to unpin)."));
+        }
+
+        await store.SetBaselineAsync(request.ConversationIds, cancellationToken);
+        return Results.NoContent();
+    }
 }
+
+/// <summary>Request body for <c>POST /api/metrics/baseline</c>.</summary>
+/// <param name="ConversationIds">Conversations forming the new baseline set; empty unpins everything.</param>
+public sealed record BaselineRequest(IReadOnlyList<string> ConversationIds);
 
 /// <summary>
 /// The validated MT (machine translation) provider name Program.cs resolved at startup

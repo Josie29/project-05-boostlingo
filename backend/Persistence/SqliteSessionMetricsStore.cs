@@ -74,6 +74,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             ("kind", "TEXT NOT NULL DEFAULT 'live'"),
             ("wer", "REAL NULL"),
             ("fixture", "TEXT NULL"),
+            ("baseline", "INTEGER NOT NULL DEFAULT 0"),
         ];
         foreach (var (name, definition) in added.Where(column => !existing.Contains(column.Name)))
         {
@@ -102,7 +103,8 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             stt_model TEXT NOT NULL DEFAULT 'gpt-4o-mini-transcribe',
             kind TEXT NOT NULL DEFAULT 'live',
             wer REAL NULL,
-            fixture TEXT NULL
+            fixture TEXT NULL,
+            baseline INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS utterances (
@@ -142,6 +144,17 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         await connection.OpenAsync(cancellationToken);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
+        // The delete-and-reinsert below must not silently unpin a conversation that
+        // was already in the baseline set (a re-post replaces data, not curation).
+        var wasBaseline = false;
+        await using (var query = connection.CreateCommand())
+        {
+            query.Transaction = transaction;
+            query.CommandText = "SELECT baseline FROM conversations WHERE id = $id";
+            query.Parameters.AddWithValue("$id", report.ConversationId);
+            wasBaseline = await query.ExecuteScalarAsync(cancellationToken) is long and not 0;
+        }
+
         // Replace wholesale (see ISessionMetricsStore): the cascade FKs take the
         // conversation's utterance/stage/transcript rows with it.
         await using (var delete = connection.CreateCommand())
@@ -156,9 +169,10 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         {
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, kind)
-                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, 'live')
+                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, kind, baseline)
+                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, 'live', $baseline)
                 """;
+            insert.Parameters.AddWithValue("$baseline", wasBaseline ? 1 : 0);
             insert.Parameters.AddWithValue("$id", report.ConversationId);
             insert.Parameters.AddWithValue("$sourceLang", report.SourceLang);
             insert.Parameters.AddWithValue("$targetLang", report.TargetLang);
@@ -254,7 +268,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
                 c.id, c.source_lang, c.target_lang, c.translation_provider, c.started_at_ms, c.ended_at_ms,
                 COUNT(CASE WHEN u.mode = 'realtime' THEN 1 END) AS realtime_count,
                 COUNT(CASE WHEN u.mode = 'cascade' THEN 1 END) AS cascade_count,
-                c.stt_model, c.kind, c.wer
+                c.stt_model, c.kind, c.wer, c.baseline
             FROM conversations c
             LEFT JOIN utterances u ON u.conversation_id = c.id
             GROUP BY c.id
@@ -279,10 +293,37 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
                 Kind: listReader.GetString(9),
                 Wer: listReader.IsDBNull(10) ? null : listReader.GetDouble(10),
                 RealtimeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "realtime"),
-                CascadeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "cascade")));
+                CascadeEndToEndMedianMs: MedianOrNull(endToEnd, conversationId, "cascade"),
+                Baseline: listReader.GetInt64(11) != 0));
         }
 
         return listings;
+    }
+
+    /// <inheritdoc />
+    public async Task SetBaselineAsync(IReadOnlyList<string> conversationIds, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var clear = connection.CreateCommand())
+        {
+            clear.Transaction = transaction;
+            clear.CommandText = "UPDATE conversations SET baseline = 0 WHERE baseline = 1";
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        foreach (var conversationId in conversationIds)
+        {
+            await using var pin = connection.CreateCommand();
+            pin.Transaction = transaction;
+            pin.CommandText = "UPDATE conversations SET baseline = 1 WHERE id = $id";
+            pin.Parameters.AddWithValue("$id", conversationId);
+            await pin.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
     }
 
     private static double? MedianOrNull(
@@ -290,10 +331,18 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         populations.TryGetValue((conversationId, mode), out var values) ? Median(values.Order().ToList()) : null;
 
     /// <inheritdoc />
-    public async Task<MetricsSummary> GetSummaryAsync(CancellationToken cancellationToken)
+    public async Task<MetricsSummary> GetSummaryAsync(
+        CancellationToken cancellationToken, BaselineScope scope = BaselineScope.All, bool collapseMtProvider = false)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
+
+        var scopeFilter = scope switch
+        {
+            BaselineScope.Baseline => " WHERE c.baseline = 1",
+            BaselineScope.Current => " WHERE c.baseline = 0",
+            _ => string.Empty,
+        };
 
         // Percentiles are computed in C# from the raw durations rather than in SQL:
         // SQLite has no built-in percentile function, and at benchmark scale (tens of
@@ -306,12 +355,12 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
                 SELECT u.mode, c.translation_provider, u.conversation_id, u.end_to_end_ms
                 FROM utterances u
                 JOIN conversations c ON c.id = u.conversation_id
-                """;
+                """ + scopeFilter;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 var mode = InterpreterModes.FromWire(reader.GetString(0));
-                var accumulator = GetAccumulator(groups, mode, reader.GetString(1));
+                var accumulator = GetAccumulator(groups, mode, collapseMtProvider ? null : reader.GetString(1));
                 accumulator.ConversationIds.Add(reader.GetString(2));
                 accumulator.UtteranceCount++;
                 if (!reader.IsDBNull(3))
@@ -328,12 +377,12 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
                 FROM utterance_stages s
                 JOIN utterances u ON u.conversation_id = s.conversation_id AND u.utterance_id = s.utterance_id
                 JOIN conversations c ON c.id = u.conversation_id
-                """;
+                """ + scopeFilter;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 var mode = InterpreterModes.FromWire(reader.GetString(0));
-                var accumulator = GetAccumulator(groups, mode, reader.GetString(1));
+                var accumulator = GetAccumulator(groups, mode, collapseMtProvider ? null : reader.GetString(1));
                 var stage = reader.GetString(2);
                 if (!accumulator.StageMs.TryGetValue(stage, out var values))
                 {
