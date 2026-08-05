@@ -101,6 +101,7 @@ app.MapLanguageEndpoints();
 app.MapRealtimeSessionEndpoints();
 app.MapCascadeAudioEndpoints();
 app.MapMetricsEndpoints();
+app.MapArchitectureEndpoints();
 
 LogOpenAiKeyStatus(app.Configuration, app.Logger);
 

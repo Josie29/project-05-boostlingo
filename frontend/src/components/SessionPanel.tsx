@@ -1,3 +1,5 @@
+import { useState, type ReactNode } from 'react';
+import type { ArchitectureInfo } from '../api';
 import type { LatencyReport, LatencySessionAverages } from '../latency/types';
 import type { SessionErrorKind, SessionMode, SessionNotice, SessionStatus } from '../session/InterpreterSession';
 import type { TranscriptEntry } from '../transcript/types';
@@ -71,6 +73,10 @@ export interface SessionPanelProps {
   onReconnect: () => void;
   /** Called to dismiss the current `notice`. */
   onDismissNotice: () => void;
+  /** Per-paradigm model info for the architecture cards, or `null` while loading/unavailable — cards still work as selectors without it. */
+  architecture: ArchitectureInfo | null;
+  /** The language pair selector, rendered inside this panel's toolbar so session setup reads as one row. */
+  pairSelector?: ReactNode;
 }
 
 /**
@@ -101,6 +107,8 @@ export function SessionPanel({
   onStop,
   onReconnect,
   onDismissNotice,
+  architecture,
+  pairSelector,
 }: SessionPanelProps) {
   const isBusy = status === 'requesting-mic' || status === 'connecting';
   const isConnected = status === 'connected';
@@ -108,27 +116,34 @@ export function SessionPanel({
 
   return (
     <section className="session-panel" aria-label="Interpreter session">
-      <div className="session-panel__mode-toggle" role="radiogroup" aria-label="Interpretation mode">
-        {MODES.map((candidate) => (
-          <button
-            key={candidate}
-            type="button"
-            role="radio"
-            aria-checked={mode === candidate}
-            className="session-panel__mode-button"
-            data-active={mode === candidate}
-            disabled={switching}
-            onClick={() => onModeChange(candidate)}
-          >
-            {MODE_LABEL[candidate]}
+      <div className="session-panel__toolbar">
+        {pairSelector}
+        <div className="session-panel__controls">
+          <button type="button" onClick={onStart} disabled={isBusy || isConnected || switching}>
+            Start
           </button>
-        ))}
+          <button type="button" onClick={onStop} disabled={status === 'idle' || switching}>
+            Stop
+          </button>
+        </div>
+        <p className="session-panel__status" data-status={status} data-switching={switching}>
+          <span className="session-panel__dot" aria-hidden="true" />
+          {statusLabel}
+        </p>
       </div>
 
-      <p className="session-panel__status" data-status={status} data-switching={switching}>
-        <span className="session-panel__dot" aria-hidden="true" />
-        {statusLabel}
-      </p>
+      <div className="session-panel__mode-cards" role="radiogroup" aria-label="Interpretation mode">
+        {MODES.map((candidate) => (
+          <ModeCard
+            key={candidate}
+            mode={candidate}
+            selected={mode === candidate}
+            disabled={switching}
+            architecture={architecture}
+            onSelect={() => onModeChange(candidate)}
+          />
+        ))}
+      </div>
 
       {status === 'error' && errorMessage && (
         <div className="session-panel__error-panel" role="alert">
@@ -155,15 +170,6 @@ export function SessionPanel({
         </div>
       )}
 
-      <div className="session-panel__controls">
-        <button type="button" onClick={onStart} disabled={isBusy || isConnected || switching}>
-          Start
-        </button>
-        <button type="button" onClick={onStop} disabled={status === 'idle' || switching}>
-          Stop
-        </button>
-      </div>
-
       <div className="session-panel__panels">
         <TranscriptPanel entries={transcriptEntries} />
         <LatencyPanel
@@ -177,5 +183,115 @@ export function SessionPanel({
         />
       </div>
     </section>
+  );
+}
+
+/** One-line summary shown under each card's name. */
+const MODE_TAGLINE: Record<SessionMode, string> = {
+  realtime: 'One model, speech to speech',
+  cascade: 'Three stages, each swappable',
+};
+
+/**
+ * A selectable architecture card: the mode toggle's radio semantics with the
+ * paradigm's models on its face. A div with role="radio" rather than a
+ * button, because the Details disclosure nests its own button inside — and
+ * an aria-label keeps the accessible name exactly the mode label, not the
+ * card's whole text content.
+ */
+function ModeCard({
+  mode,
+  selected,
+  disabled,
+  architecture,
+  onSelect,
+}: {
+  mode: SessionMode;
+  selected: boolean;
+  disabled: boolean;
+  architecture: ArchitectureInfo | null;
+  onSelect: () => void;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
+  function select(): void {
+    if (!disabled) onSelect();
+  }
+
+  return (
+    <div
+      className="session-panel__mode-card"
+      role="radio"
+      aria-checked={selected}
+      aria-label={MODE_LABEL[mode]}
+      aria-disabled={disabled}
+      data-mode={mode}
+      data-selected={selected}
+      tabIndex={0}
+      onClick={select}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          select();
+        }
+      }}
+    >
+      <div className="session-panel__mode-card-head">
+        <span className="session-panel__mode-dot" aria-hidden="true" />
+        <span className="session-panel__mode-name">{MODE_LABEL[mode]}</span>
+        <button
+          type="button"
+          className="session-panel__mode-details-toggle"
+          aria-expanded={detailsOpen}
+          onClick={(event) => {
+            event.stopPropagation();
+            setDetailsOpen((open) => !open);
+          }}
+        >
+          Details
+        </button>
+      </div>
+      <p className="session-panel__mode-tagline">{MODE_TAGLINE[mode]}</p>
+
+      {mode === 'realtime' ? (
+        <p className="session-panel__stage-row">
+          <code>{architecture?.realtime.model ?? '…'}</code>
+        </p>
+      ) : (
+        <>
+          <p className="session-panel__stage-row">
+            <span className="session-panel__stage-name">STT</span>
+            <code>{architecture?.cascade.stt.model ?? '…'}</code>
+          </p>
+          <p className="session-panel__stage-row">
+            <span className="session-panel__stage-name">MT</span>
+            <code>{architecture?.cascade.mt.model ?? '…'}</code>
+            {architecture && <span className="session-panel__provider-badge">{architecture.cascade.mt.provider}</span>}
+          </p>
+          <p className="session-panel__stage-row">
+            <span className="session-panel__stage-name">TTS</span>
+            <code>{architecture?.cascade.tts.model ?? '…'}</code>
+          </p>
+        </>
+      )}
+
+      {detailsOpen && (
+        <div className="session-panel__mode-details">
+          {mode === 'realtime' ? (
+            <p>transport · WebRTC, browser ↔ OpenAI direct; the backend only mints the session token</p>
+          ) : (
+            <>
+              <p>audio · PCM16 mono 24kHz end to end</p>
+              {architecture && (
+                <p>
+                  swap · <code>TRANSLATION_PROVIDER={architecture.cascade.mtAlternative.provider}</code> runs{' '}
+                  <code>{architecture.cascade.mtAlternative.model}</code>, no code change
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

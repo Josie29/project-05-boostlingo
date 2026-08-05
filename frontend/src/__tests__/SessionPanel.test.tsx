@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { SessionPanel } from '../components/SessionPanel';
 import type { SessionPanelProps } from '../components/SessionPanel';
@@ -16,6 +16,7 @@ function renderPanel(overrides: Partial<SessionPanelProps> = {}) {
     latencyReports: [],
     latencyAveragesByMode: { realtime: EMPTY_LATENCY_AVERAGES, cascade: EMPTY_LATENCY_AVERAGES },
     notice: null,
+    architecture: null,
     onModeChange: vi.fn(),
     onStart: vi.fn(),
     onStop: vi.fn(),
@@ -47,13 +48,60 @@ describe('SessionPanel', () => {
     expect(props.onModeChange).toHaveBeenCalledWith('cascade');
   });
 
-  // Catches the bug where the toggle stays clickable mid-switch, letting a listener
-  // fire off a second switch before the first one has torn its transport down.
-  it('disables both mode buttons while a switch is in progress', () => {
-    renderPanel({ switching: true });
+  const ARCHITECTURE = {
+    realtime: { model: 'gpt-realtime' },
+    cascade: {
+      stt: { model: 'gpt-4o-mini-transcribe' },
+      mt: { provider: 'openai', model: 'gpt-4o-mini' },
+      mtAlternative: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+      tts: { model: 'gpt-4o-mini-tts' },
+    },
+  };
 
-    expect(screen.getByRole('radio', { name: 'Realtime' })).toBeDisabled();
-    expect(screen.getByRole('radio', { name: 'Cascade' })).toBeDisabled();
+  // Catches the architecture cards not actually saying what runs: each paradigm's
+  // card must show its model(s), with the MT row carrying its provider.
+  it('renders each paradigm\'s models on its mode card', () => {
+    renderPanel({ architecture: ARCHITECTURE });
+
+    expect(screen.getByText('gpt-realtime')).toBeInTheDocument();
+    expect(screen.getByText('gpt-4o-mini-transcribe')).toBeInTheDocument();
+    expect(screen.getByText('gpt-4o-mini')).toBeInTheDocument();
+    expect(screen.getByText('openai')).toBeInTheDocument();
+    expect(screen.getByText('gpt-4o-mini-tts')).toBeInTheDocument();
+  });
+
+  // Catches the provider-swap story staying invisible: expanding the cascade
+  // card's details must name the other provider and the model a swap would run.
+  it('reveals the MT provider swap in the cascade card\'s details', () => {
+    renderPanel({ architecture: ARCHITECTURE });
+    expect(screen.queryByText(/claude-haiku-4-5/)).not.toBeInTheDocument();
+
+    const cascadeCard = screen.getByRole('radio', { name: 'Cascade' });
+    fireEvent.click(within(cascadeCard).getByRole('button', { name: 'Details' }));
+
+    expect(screen.getByText('claude-haiku-4-5')).toBeInTheDocument();
+    expect(screen.getByText(/TRANSLATION_PROVIDER=anthropic/)).toBeInTheDocument();
+  });
+
+  // Catches the details toggle hijacking selection: expanding a card's details
+  // must not also switch the active mode.
+  it('does not change mode when toggling a card\'s details', () => {
+    const props = renderPanel({ mode: 'realtime', architecture: ARCHITECTURE });
+
+    const cascadeCard = screen.getByRole('radio', { name: 'Cascade' });
+    fireEvent.click(within(cascadeCard).getByRole('button', { name: 'Details' }));
+
+    expect(props.onModeChange).not.toHaveBeenCalled();
+  });
+
+  // Catches the bug where the mode cards stay clickable mid-switch, letting a
+  // listener fire off a second switch before the first tears its transport down.
+  it('ignores mode card clicks while a switch is in progress', () => {
+    const props = renderPanel({ switching: true });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Cascade' }));
+
+    expect(props.onModeChange).not.toHaveBeenCalled();
   });
 
   // Catches the bug where "switching..." never renders, leaving a listener staring

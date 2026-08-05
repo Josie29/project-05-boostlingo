@@ -37,14 +37,59 @@ export interface TranscriptPanelProps {
 
 /**
  * Live transcript UI: a source column (what was said) and a target column
- * (its interpretation), each auto-scrolling as new text arrives. Each entry
- * carries a mode rail + chip (chip text, never color alone), a filter row
- * narrows both columns to one mode, and a labeled divider marks each
- * mid-conversation mode switch.
+ * (its interpretation). Each entry carries a mode rail + chip (chip text,
+ * never color alone), a filter row narrows both columns to one mode, and a
+ * labeled divider marks each mid-conversation mode switch.
+ *
+ * The two columns scroll as one: a scroll in either column moves the other
+ * proportionally (their content heights differ, so position maps by ratio,
+ * not pixels), and the "listener scrolled away from the bottom" state that
+ * pauses auto-scroll is shared — otherwise a new entry would yank the synced
+ * column back to the bottom out from under the scrolled-up one.
  */
 export function TranscriptPanel({ entries }: TranscriptPanelProps) {
   const [filter, setFilter] = useState<ModeFilter>('all');
   const visible = filter === 'all' ? entries : entries.filter((entry) => modeOfPrefixedId(entry.id) === filter);
+
+  const scrollElements = useRef<Partial<Record<TranscriptLane, HTMLDivElement>>>({});
+  const scrolledAwayFromBottomRef = useRef(false);
+  // Lane whose scrollTop was just set programmatically by the sync below: its
+  // resulting scroll event is an echo, not a user gesture, and must not sync
+  // back (feedback loop) or overwrite the shared scrolled-away state.
+  const suppressEchoRef = useRef<TranscriptLane | null>(null);
+
+  function registerScrollElement(lane: TranscriptLane, element: HTMLDivElement | null): void {
+    if (element) {
+      scrollElements.current[lane] = element;
+    } else {
+      delete scrollElements.current[lane];
+    }
+  }
+
+  function handleScroll(lane: TranscriptLane): void {
+    if (suppressEchoRef.current === lane) {
+      suppressEchoRef.current = null;
+      return;
+    }
+
+    const element = scrollElements.current[lane];
+    if (!element) return;
+
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+    scrolledAwayFromBottomRef.current = distanceFromBottom > NEAR_BOTTOM_THRESHOLD_PX;
+
+    const followerLane: TranscriptLane = lane === 'source' ? 'target' : 'source';
+    const follower = scrollElements.current[followerLane];
+    if (!follower) return;
+    const leaderMax = element.scrollHeight - element.clientHeight;
+    const followerMax = follower.scrollHeight - follower.clientHeight;
+    if (leaderMax <= 0 || followerMax <= 0) return;
+
+    const next = (element.scrollTop / leaderMax) * followerMax;
+    if (Math.abs(follower.scrollTop - next) < 1) return;
+    suppressEchoRef.current = followerLane;
+    follower.scrollTop = next;
+  }
 
   return (
     <section className="transcript-panel" aria-label="Live transcript">
@@ -67,6 +112,9 @@ export function TranscriptPanel({ entries }: TranscriptPanelProps) {
             key={lane}
             lane={lane}
             entries={visible.filter((entry) => entry.lane === lane)}
+            scrolledAwayFromBottomRef={scrolledAwayFromBottomRef}
+            registerScrollElement={registerScrollElement}
+            onScroll={handleScroll}
           />
         ))}
       </div>
@@ -74,37 +122,42 @@ export function TranscriptPanel({ entries }: TranscriptPanelProps) {
   );
 }
 
-function TranscriptColumn({ lane, entries }: { lane: TranscriptLane; entries: TranscriptEntry[] }) {
+function TranscriptColumn({
+  lane,
+  entries,
+  scrolledAwayFromBottomRef,
+  registerScrollElement,
+  onScroll,
+}: {
+  lane: TranscriptLane;
+  entries: TranscriptEntry[];
+  /** Shared across both columns — see `TranscriptPanel`'s remarks on synced scrolling. */
+  scrolledAwayFromBottomRef: React.RefObject<boolean>;
+  registerScrollElement: (lane: TranscriptLane, element: HTMLDivElement | null) => void;
+  onScroll: (lane: TranscriptLane) => void;
+}) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  // True once the listener has manually scrolled away from the bottom (e.g.
-  // scrolling up to reread something said earlier). The auto-scroll effect
-  // below checks this before re-pinning scrollTop, so it stops hijacking a
-  // manual scroll-up on every subsequent render — a ref rather than state
-  // since it's read only from that effect/the scroll handler, and updating
-  // it should never itself trigger a re-render.
-  const scrolledAwayFromBottomRef = useRef(false);
 
   // Keeps the newest text in view as entries grow or in-progress text
   // lengthens, so a listener who's still following along at the bottom
   // doesn't have to manually scroll during a live session — but only while
-  // they're actually still at the bottom; see `handleScroll`.
+  // they're actually still at the bottom (shared state; see panel remarks).
   useEffect(() => {
     const element = scrollRef.current;
     if (element && !scrolledAwayFromBottomRef.current) element.scrollTop = element.scrollHeight;
-  }, [entries]);
-
-  /** Tracks whether the listener is still within `NEAR_BOTTOM_THRESHOLD_PX` of the bottom, for the auto-scroll effect above to check before re-pinning. */
-  function handleScroll(): void {
-    const element = scrollRef.current;
-    if (!element) return;
-    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-    scrolledAwayFromBottomRef.current = distanceFromBottom > NEAR_BOTTOM_THRESHOLD_PX;
-  }
+  }, [entries, scrolledAwayFromBottomRef]);
 
   return (
     <div className="transcript-panel__column" data-lane={lane}>
       <h3 className="transcript-panel__column-header">{LANE_LABEL[lane]}</h3>
-      <div className="transcript-panel__scroll" ref={scrollRef} onScroll={handleScroll}>
+      <div
+        className="transcript-panel__scroll"
+        ref={(element) => {
+          scrollRef.current = element;
+          registerScrollElement(lane, element);
+        }}
+        onScroll={() => onScroll(lane)}
+      >
         {entries.length === 0 ? (
           <p className="transcript-panel__empty">Nothing yet.</p>
         ) : (

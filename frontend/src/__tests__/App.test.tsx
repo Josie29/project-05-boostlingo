@@ -37,11 +37,25 @@ function stubHook(overrides: Partial<UseInterpreterSessionResult> = {}): void {
   } satisfies UseInterpreterSessionResult);
 }
 
-/** Stubs the two backend calls the rest of the shell still makes directly: `/healthz` (BackendStatus) and `/api/languages` (LanguagePairSelector). */
+/** Stubs the backend calls the shell makes directly: `/healthz` (BackendStatus), `/api/languages` (LanguagePairSelector), and `/api/architecture` (mode cards). */
 function stubBackendFetches(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string) => {
+      if (url.toString().includes('/api/architecture')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            realtime: { model: 'gpt-realtime' },
+            cascade: {
+              stt: { model: 'gpt-4o-mini-transcribe' },
+              mt: { provider: 'openai', model: 'gpt-4o-mini' },
+              mtAlternative: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+              tts: { model: 'gpt-4o-mini-tts' },
+            },
+          }),
+        });
+      }
       if (url.toString().includes('/api/languages')) {
         return Promise.resolve({
           ok: true,

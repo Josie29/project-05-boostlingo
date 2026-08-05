@@ -142,6 +142,53 @@ describe('TranscriptPanel', () => {
     });
   });
 
+  describe('synced column scrolling', () => {
+    const bothLanes: TranscriptEntry[] = [
+      { id: 'a', lane: 'source', text: 'Hola', final: true },
+      { id: 'a-target', lane: 'target', text: 'Hello', final: true },
+    ];
+
+    function scrollElement(container: HTMLElement, lane: string): HTMLElement {
+      return container.querySelector(`.transcript-panel__column[data-lane="${lane}"] .transcript-panel__scroll`) as HTMLElement;
+    }
+
+    // Catches the columns drifting apart: scrolling one lane must move the other
+    // to the same proportional position, so a reader comparing an utterance to
+    // its interpretation never has to hunt for it in the other column.
+    it('scrolls the other column proportionally when one is scrolled', () => {
+      const { container } = render(<TranscriptPanel entries={bothLanes} />);
+      const source = scrollElement(container, 'source');
+      const target = scrollElement(container, 'target');
+      stubScrollGeometry(source, { scrollTop: 250, scrollHeight: 600, clientHeight: 100 });
+      stubScrollGeometry(target, { scrollTop: 0, scrollHeight: 300, clientHeight: 100 });
+
+      fireEvent.scroll(source);
+
+      // Source is halfway through its 500px range; target lands halfway through its 200px range.
+      expect(target.scrollTop).toBe(100);
+    });
+
+    // Catches the sync fighting auto-scroll: scrolling AWAY in one column must
+    // pause bottom-pinning for BOTH, or a new entry would yank the synced
+    // column back down while its twin stays scrolled up.
+    it('pauses auto-scroll for both columns once either is scrolled away from the bottom', () => {
+      const { container, rerender } = render(<TranscriptPanel entries={bothLanes} />);
+      const source = scrollElement(container, 'source');
+      const target = scrollElement(container, 'target');
+      stubScrollGeometry(source, { scrollTop: 0, scrollHeight: 600, clientHeight: 100 });
+      stubScrollGeometry(target, { scrollTop: 0, scrollHeight: 300, clientHeight: 100 });
+
+      fireEvent.scroll(source);
+      rerender(
+        <TranscriptPanel
+          entries={[...bothLanes, { id: 'b', lane: 'target', text: 'More', final: true }]}
+        />,
+      );
+
+      expect(target.scrollTop).toBe(0);
+    });
+  });
+
   describe('mode attribution', () => {
     const mixedEntries: TranscriptEntry[] = [
       { id: 'realtime:a', lane: 'source', text: 'Said over realtime', final: true },

@@ -181,6 +181,42 @@ export async function reportConversationMetrics(payload: ConversationMetricsPayl
   }
 }
 
+/** The MT (machine translation) stage: the one cascade stage where the provider is a config choice. */
+export interface MtStageInfo {
+  provider: string;
+  model: string;
+}
+
+/**
+ * Which models power each paradigm, per `GET /api/architecture` — backend
+ * truth from the providers' own constants, so the architecture cards can't
+ * drift from what actually runs when `TRANSLATION_PROVIDER` flips.
+ */
+export interface ArchitectureInfo {
+  realtime: { model: string };
+  cascade: {
+    stt: { model: string };
+    mt: MtStageInfo;
+    /** The other MT provider — what selecting it would run (the provider-swap demo). */
+    mtAlternative: MtStageInfo;
+    tts: { model: string };
+  };
+}
+
+/**
+ * Fetches the per-paradigm model architecture.
+ *
+ * @returns Models per paradigm/stage, including the currently selected MT provider.
+ * @throws {Error} If the network request fails or the response is not ok.
+ */
+export async function getArchitecture(): Promise<ArchitectureInfo> {
+  const response = await fetch('/api/architecture');
+  if (!response.ok) {
+    throw new Error(`Failed to fetch architecture (status ${response.status})`);
+  }
+  return (await response.json()) as ArchitectureInfo;
+}
+
 /**
  * Fetches every language the interpreter supports, in both realtime and
  * cascade modes, so the language pair selector can render its options from
