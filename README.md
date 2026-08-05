@@ -12,6 +12,9 @@ architecture fits which scenario, backed by per-stage latency instrumentation vi
 in the UI.
 
 - [docs/BRIEF.md](docs/BRIEF.md) — the partner brief, verbatim
+- [docs/tech-stack.md](docs/tech-stack.md) — stack decisions, chosen vs. rejected
+- [docs/comparison.md](docs/comparison.md) — the Realtime vs. Cascade comparison write-up
+- [CLAUDE.md](CLAUDE.md) — how the coding agent was directed (required by the brief)
 
 ## Acronyms
 
@@ -28,7 +31,70 @@ in the UI.
 
 ## Status
 
-MVP-testable. Both modes (Realtime and Cascade) are wired end to end.
+Feature-complete. Both modes (Realtime and Cascade) are wired end to end, with
+language pair selection, per-stage latency instrumentation, barge-in handling,
+error hardening, and a config-swappable second MT provider.
+
+## Architecture
+
+Two interpretation architectures share one mode-agnostic UI.
+
+### Realtime mode
+
+```
+Mic ──WebRTC──▶ OpenAI Realtime API (gpt-realtime) ──WebRTC──▶ Speaker
+                        │
+                        └─ transcription events ──▶ data channel ──▶ transcript/latency panels
+```
+
+The browser talks to OpenAI directly over WebRTC. The backend's only realtime
+job is minting a short-lived client secret (`POST /api/realtime/session`, see
+`backend/RealtimeSession.cs`) so the `OPENAI_API_KEY` never reaches the
+browser. `frontend/src/realtime/RealtimeSessionController.ts` owns the peer
+connection, mic tracks, and the `oai-events` data channel.
+
+### Cascade mode
+
+```
+Mic ─PCM16─▶ /ws/cascade ─▶ STT (ISttProvider) ─segments─▶ MT (ITranslationProvider)
+ (browser)   (WebSocket)         │                              │ tokens
+                                 ▼                              ▼
+                        transcript.partial/final      SentenceChunker ─phrases─▶ TTS (ITtsProvider)
+                             (source lane)                 (target lane)              │
+                                                                                     ▼
+Browser ◀── tts.audio.start / binary PCM frames / tts.audio.end ◀────────────────────┘
+```
+
+The browser streams 24 kHz PCM16 over a WebSocket (`backend/CascadeSession.cs`
+is the transport; the JSON envelope and payload types live in
+`backend/CascadeProtocol.cs`). `backend/CascadePipeline.cs` orchestrates the
+stages: STT segments stream to the client as source-lane transcripts and queue
+for translation; translation tokens stream to the target lane while
+`backend/SentenceChunker.cs` cuts them into phrases; `backend/TtsCascadeObserver.cs`
+synthesizes each phrase and pushes raw PCM frames the browser's
+`AudioPlaybackQueue` schedules gaplessly. Every stage streams — nothing waits
+for a full utterance. Barge-in (speech re-starting mid-playback) cancels
+in-flight translation/synthesis and flushes client playback.
+
+### The provider seam
+
+Cascade stages hide behind three interfaces — `ISttProvider`,
+`ITranslationProvider`, `ITtsProvider` (`backend/Providers/`). Everything
+vendor-specific (endpoints, wire shapes, model names) lives inside one provider
+class, so swapping a vendor is a contained change. This is demonstrated, not
+just claimed: the MT stage ships with two implementations — OpenAI
+(`gpt-4o-mini`) and Anthropic Claude (`claude-haiku-4-5`) — selected by
+`TRANSLATION_PROVIDER=openai|anthropic` with no code changes outside the
+provider class and its registration.
+
+### Frontend seam
+
+`frontend/src/session/InterpreterSession.ts` is the mode-agnostic interface
+both transports implement. Shared UI (transcript panel, latency panel, session
+controls) consumes only that seam; wire-format knowledge stays in the
+`realtime/` and `cascade/` adapter directories. Transcript and latency history
+live above both transports, which is what makes mid-session mode switching
+preserve them.
 
 ## Setup
 
@@ -47,6 +113,10 @@ cd backend
 cp ../.env.example ../.env   # fill in OPENAI_API_KEY
 dotnet run
 ```
+
+Optional: to run the cascade's translation stage on Anthropic Claude instead
+of OpenAI, also set `TRANSLATION_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`
+in `.env` (see `.env.example` for the model-override knob).
 
 Serves on `http://localhost:5170`. Confirm it's up:
 
