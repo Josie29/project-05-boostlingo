@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 /// Streams PCM16 audio to OpenAI's Realtime API in transcription intent
 /// (<c>wss://api.openai.com/v1/realtime?intent=transcription</c>) and turns the
 /// server's transcription delta/completed events into <see cref="SttSegment"/>s. Every
-/// <c>gpt-4o-transcribe</c>-specific detail (message shapes, model name, VAD choice)
+/// <c>gpt-4o-mini-transcribe</c>-specific detail (message shapes, model name, VAD choice)
 /// lives in this one file, per the issue's acceptance criteria that nothing outside
 /// the provider knows which STT vendor is in use.
 /// </summary>
@@ -19,7 +19,7 @@ public sealed class OpenAiSttProvider(
     TimeSpan? connectTimeout = null) : ISttProvider
 {
     /// <summary>OpenAI transcription model used for cascade-mode STT.</summary>
-    public const string Model = "gpt-4o-transcribe";
+    public const string Model = "gpt-4o-mini-transcribe";
 
     /// <summary>
     /// OpenAI server-side VAD (Voice Activity Detection) mode used to decide utterance

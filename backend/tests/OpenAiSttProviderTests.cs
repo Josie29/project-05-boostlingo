@@ -44,7 +44,7 @@ public class OpenAiSttProviderTests
 
     /// <summary>
     /// Confirms starting a stream connects to OpenAI's transcription-intent endpoint
-    /// with the bearer key and sends a session config naming gpt-4o-transcribe and the
+    /// with the bearer key and sends a session config naming gpt-4o-mini-transcribe and the
     /// chosen VAD mode - the whole point of hiding a real key/model behind DI is that
     /// this is the one place that config is allowed to exist.
     /// </summary>

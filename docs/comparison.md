@@ -58,11 +58,11 @@ conversions per provider docs; validate against measured usage in benchmarks.md.
 
 | | Realtime (`gpt-realtime`) | Cascade (STT→MT→TTS) |
 | --- | --- | --- |
-| Speech-to-text | — | gpt-4o-transcribe ≈ $0.006/min |
+| Speech-to-text | — | gpt-4o-mini-transcribe ≈ $0.003/min |
 | Translation | — | gpt-4o-mini or claude-haiku-4-5: <$0.001/min (short utterances) |
 | Text-to-speech | — | gpt-4o-mini-tts ≈ $0.015/min of output audio |
 | Voice-to-voice | audio in ≈ $0.02/min + audio out ≈ $0.04/min, plus growing cached-context input | — |
-| **Ballpark total** | **$0.06–0.15/min** (rises with session length as context accumulates) | **$0.02–0.03/min** (flat per minute) |
+| **Ballpark total** | **$0.06–0.15/min** (rises with session length as context accumulates) | **$0.015–0.025/min** (flat per minute) |
 
 Two structural points matter more than the exact figures: cascade cost is
 **flat and per-stage tunable** (swap any stage for a cheaper vendor), while
