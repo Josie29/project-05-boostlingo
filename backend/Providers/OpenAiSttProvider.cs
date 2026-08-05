@@ -207,6 +207,11 @@ public sealed class OpenAiSttProvider(
         {
             var type = root.TryGetProperty("type", out var typeProperty) ? typeProperty.GetString() : null;
 
+            // Permanent debug telemetry: without this, an event type this switch
+            // doesn't map (or a session where OpenAI sends nothing at all) is
+            // indistinguishable from a healthy-but-quiet stream.
+            logger.LogDebug("OpenAI transcription event: {EventType}.", type);
+
             switch (type)
             {
                 case "conversation.item.input_audio_transcription.delta":

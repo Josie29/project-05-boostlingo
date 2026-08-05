@@ -27,6 +27,7 @@ in the UI.
 | WER | Word Error Rate | Standard accuracy metric for STT output: percentage of words inserted, deleted, or substituted vs. a reference transcript. Lower is better. |
 | PCM | Pulse Code Modulation | Raw uncompressed audio samples — the format streamed from the mic to the STT provider. |
 | VAD | Voice Activity Detection | Decides when speech starts and stops, which is what triggers the pipeline to commit a segment. |
+| RTC | Real-Time Communication | WebRTC is the peer-to-peer protocol Realtime mode uses for direct browser↔OpenAI audio. |
 | Barge-in | (not an acronym) | The speaker starting a new utterance while output audio is still playing, requiring the playback queue to flush. |
 
 ## Status

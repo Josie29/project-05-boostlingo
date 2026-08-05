@@ -167,6 +167,9 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
 
     private long _bytesSinceLastLog;
     private DateTime _lastLogUtc = DateTime.UtcNow;
+    private int _peakSinceLastLog;
+    private double _sumSquaresSinceLastLog;
+    private long _samplesSinceLastLog;
     private bool _sessionEndedNotified;
 
     /// <summary>
@@ -279,10 +282,12 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
     }
 
     /// <summary>
-    /// Enqueues one PCM chunk for the pipeline and logs throughput roughly once a
-    /// second - deliberate, permanent debug telemetry (not tied to any one pipeline
-    /// stage) for spotting an audio stall or a misbehaving client at a glance without
-    /// needing to instrument every stage downstream separately.
+    /// Enqueues one PCM chunk for the pipeline and logs throughput plus signal level
+    /// (peak and RMS (Root Mean Square) of the int16 samples) roughly once a second -
+    /// deliberate, permanent debug telemetry (not tied to any one pipeline stage).
+    /// Throughput at the expected rate with peak/RMS near zero is the signature of a
+    /// dead capture path: the client is streaming, but what it streams is silence -
+    /// indistinguishable from a healthy session by byte counts alone.
     /// </summary>
     /// <param name="pcm">One binary WebSocket frame's worth of PCM16 audio.</param>
     private void HandleAudioChunk(byte[] pcm)
@@ -291,12 +296,34 @@ public sealed class CascadeSession(WebSocket socket, ICascadePipeline pipeline, 
         _audioChannel.Writer.TryWrite(pcm);
 
         _bytesSinceLastLog += pcm.Length;
+        var sampleCount = pcm.Length >> 1; // 2 bytes per int16 sample
+        for (var i = 0; i < sampleCount; i++)
+        {
+            int sample = BitConverter.ToInt16(pcm, i * 2);
+            var magnitude = Math.Abs(sample);
+            if (magnitude > _peakSinceLastLog)
+            {
+                _peakSinceLastLog = magnitude;
+            }
+
+            _sumSquaresSinceLastLog += (double)sample * sample;
+        }
+
+        _samplesSinceLastLog += sampleCount;
+
         var now = DateTime.UtcNow;
         if (now - _lastLogUtc >= TimeSpan.FromSeconds(1))
         {
+            var rms = _samplesSinceLastLog > 0
+                ? Math.Sqrt(_sumSquaresSinceLastLog / _samplesSinceLastLog)
+                : 0;
             logger.LogDebug(
-                "Cascade session {SessionId} audio throughput: {BytesPerSecond} B/s.", _sessionId, _bytesSinceLastLog);
+                "Cascade session {SessionId} audio throughput: {BytesPerSecond} B/s, peak {Peak}, RMS {Rms:F0} (int16 full scale 32767).",
+                _sessionId, _bytesSinceLastLog, _peakSinceLastLog, rms);
             _bytesSinceLastLog = 0;
+            _peakSinceLastLog = 0;
+            _sumSquaresSinceLastLog = 0;
+            _samplesSinceLastLog = 0;
             _lastLogUtc = now;
         }
     }
