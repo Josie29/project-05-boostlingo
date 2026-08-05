@@ -1,7 +1,7 @@
 using System.Net;
 
 /// <summary>
-/// Shared send-with-one-retry policy for the request-per-utterance OpenAI HTTP
+/// Shared send-with-one-retry policy for the request-per-utterance HTTP
 /// providers (<see cref="OpenAiTranslationProvider"/>, <see cref="OpenAiTtsProvider"/>).
 /// Retries exactly once (#12, error handling hardening) if the first attempt fails
 /// transiently: a connection failure, a request timeout, a 429 (rate limited), or any
@@ -10,7 +10,7 @@ using System.Net;
 /// vendor wire shape, so factoring it out of the individual provider files doesn't
 /// violate the everything-vendor-specific-lives-in-one-file convention.
 /// </summary>
-internal static class OpenAiHttpRetry
+internal static class ProviderHttpRetry
 {
     /// <summary>
     /// One-retry-only backoff between the initial attempt and its single retry - short

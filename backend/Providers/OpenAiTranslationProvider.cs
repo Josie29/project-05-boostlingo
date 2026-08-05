@@ -57,7 +57,7 @@ public sealed class OpenAiTranslationProvider(
             throw new TranslationProviderException("The server is not configured with an OpenAI API key.");
         }
 
-        var response = await OpenAiHttpRetry.SendWithOneRetryAsync(
+        var response = await ProviderHttpRetry.SendWithOneRetryAsync(
             httpClient,
             () => BuildRequest(request, apiKey),
             stageName: "Machine translation",
@@ -146,26 +146,9 @@ public sealed class OpenAiTranslationProvider(
         Stream: true,
         Messages:
         [
-            new OpenAiChatMessage("system", BuildInstructions(request.SourceLang, request.TargetLang)),
+            new OpenAiChatMessage("system", TranslationInstructions.Build(request.SourceLang, request.TargetLang)),
             new OpenAiChatMessage("user", request.SourceText),
         ]);
-
-    /// <summary>
-    /// Interpreter-style system prompt that constrains the model to pure translation:
-    /// no greetings, no commentary, no answering the message on its own behalf -
-    /// mirroring <see cref="RealtimeInterpreterSession.Instructions"/>'s constraints for
-    /// the realtime-mode interpreter persona, but parameterized by language pair since
-    /// cascade sessions negotiate <c>sourceLang</c>/<c>targetLang</c> per session rather
-    /// than hardcoding one.
-    /// </summary>
-    private static string BuildInstructions(string sourceLang, string targetLang) =>
-        $"You are a machine translation engine translating from {sourceLang} to {targetLang}. " +
-        "Translate the user's message into the target language only. Output only the " +
-        "translation itself - no greetings, no commentary, no explanations, no quotation " +
-        "marks, and never repeat, answer, or otherwise respond to the original text as if " +
-        "it were addressed to you. Preserve the speaker's tone, meaning, and register as " +
-        "closely as natural phrasing allows. If the message is empty or has nothing " +
-        "translatable in it, output nothing.";
 
     /// <summary>
     /// Extracts the incremental token text from one OpenAI chat completion streaming

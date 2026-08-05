@@ -70,7 +70,7 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
             throw new TtsProviderException("The server is not configured with an OpenAI API key.");
         }
 
-        var response = await OpenAiHttpRetry.SendWithOneRetryAsync(
+        var response = await ProviderHttpRetry.SendWithOneRetryAsync(
             httpClient,
             () => BuildRequest(request, apiKey),
             stageName: "Text-to-speech",

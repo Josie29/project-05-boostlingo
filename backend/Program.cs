@@ -18,14 +18,35 @@ builder.Services.AddHttpClient<IRealtimeSessionClient, OpenAiRealtimeSessionClie
 builder.Services.AddSingleton<IRealtimeSocketFactory, ClientWebSocketRealtimeSocketFactory>();
 builder.Services.AddSingleton<ISttProvider, OpenAiSttProvider>();
 
-// MT (machine translation; #6) provider. Typed HttpClient, same pattern as
-// IRealtimeSessionClient above - OPENAI_API_KEY is attached per-request inside
-// OpenAiTranslationProvider and never exposed to callers of ITranslationProvider.
-builder.Services.AddHttpClient<ITranslationProvider, OpenAiTranslationProvider>(client =>
+// MT (machine translation; #6) provider, selected via TRANSLATION_PROVIDER
+// ("openai" default, or "anthropic" - the provider-swap demo, #17). Typed
+// HttpClient either way, same pattern as IRealtimeSessionClient above - the API key
+// is attached per-request inside the provider and never exposed to callers of
+// ITranslationProvider. An unrecognized value fails startup rather than silently
+// falling back, so a config typo can't quietly run the wrong provider.
+var translationProvider = builder.Configuration["TRANSLATION_PROVIDER"]?.ToLowerInvariant() ?? "openai";
+switch (translationProvider)
 {
-    client.BaseAddress = new Uri("https://api.openai.com/v1/");
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
+    case "openai":
+        builder.Services.AddHttpClient<ITranslationProvider, OpenAiTranslationProvider>(client =>
+        {
+            client.BaseAddress = new Uri("https://api.openai.com/v1/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+        break;
+
+    case "anthropic":
+        builder.Services.AddHttpClient<ITranslationProvider, AnthropicTranslationProvider>(client =>
+        {
+            client.BaseAddress = new Uri("https://api.anthropic.com/v1/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+        break;
+
+    default:
+        throw new InvalidOperationException(
+            $"Unrecognized TRANSLATION_PROVIDER '{translationProvider}'. Valid values: openai, anthropic.");
+}
 
 // TTS (text-to-speech; #7) provider. Typed HttpClient, same pattern as
 // ITranslationProvider above - OPENAI_API_KEY is attached per-request inside
@@ -63,6 +84,15 @@ app.MapRealtimeSessionEndpoints();
 app.MapCascadeAudioEndpoints();
 
 LogOpenAiKeyStatus(app.Configuration, app.Logger);
+
+app.Logger.LogInformation("Machine translation provider: {Provider}.", translationProvider);
+if (translationProvider == "anthropic" && string.IsNullOrWhiteSpace(app.Configuration["ANTHROPIC_API_KEY"]))
+{
+    app.Logger.LogWarning(
+        "TRANSLATION_PROVIDER is 'anthropic' but ANTHROPIC_API_KEY is not set. Set it via " +
+        "environment variable or 'dotnet user-secrets set ANTHROPIC_API_KEY <value>' " +
+        "before starting a cascade session.");
+}
 
 app.Run();
 
