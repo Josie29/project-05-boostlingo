@@ -17,6 +17,14 @@ describe('GroundTruthField', () => {
     expect(screen.getByText('Stop if swelling occurs.')).toBeInTheDocument();
   });
 
+  // A fixed box hid the tail of a long set, which is exactly the content someone
+  // needs to see to notice their reference stops short of the audio.
+  it('grows the box to fit a long reference', () => {
+    renderField(Array.from({ length: 14 }, (_, index) => `Utterance ${index}.`).join('\n\n'));
+
+    expect(Number(screen.getByLabelText('Ground truth transcript').getAttribute('rows'))).toBeGreaterThan(14);
+  });
+
   // Catches pasted table rows vanishing silently — losing half a reference
   // without saying so is what makes a clean run look like a model failure.
   it('says when it dropped markdown table rows', () => {

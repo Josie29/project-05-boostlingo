@@ -1,13 +1,22 @@
 import { groundTruthLines, normalizeForWer } from '../lab/wer';
 
-/** The format, by example — the fastest way to convey it. */
-const EXAMPLE = `# healthcare-practice-v1, en -> es
-Are you allergic to any medications?
-I have been having sharp chest pain for about three days.
-Take one tablet twice a day with food.`;
+/**
+ * The format by example, using the real practice set (`docs/benchmark-practice-set.md`)
+ * rather than shortened stand-ins: an example that trails off mid-utterance invites a
+ * paste that does the same, which scores as insertions and reads as a model failure.
+ * Blank lines separate utterances so a wrapped long one stays visually distinct.
+ */
+const EXAMPLE = `Are you allergic to any medications?
+
+I have been having sharp chest pain for about three days, and it gets worse when I climb stairs or carry groceries.
+
+Take one tablet twice a day with food, and if you notice swelling in your face or trouble breathing, stop the medication and go to the emergency room.`;
 
 /** Below this the denominator is small enough that one error swings WER wildly. */
 const SHORT_REFERENCE_WORDS = 20;
+
+const MIN_ROWS = 8;
+const MAX_ROWS = 24;
 
 export interface GroundTruthFieldProps {
   value: string;
@@ -22,6 +31,9 @@ export interface GroundTruthFieldProps {
  */
 export function GroundTruthField({ value, onChange }: GroundTruthFieldProps) {
   const utterances = groundTruthLines(value);
+  // Grows with the paste: a fixed box hides the tail of a long set, which is
+  // exactly the content someone needs to see to notice it is incomplete.
+  const rows = Math.min(MAX_ROWS, Math.max(MIN_ROWS, value.split('\n').length + 1));
   // The same normalization the scorer applies, so this IS the WER denominator.
   const words = normalizeForWer(utterances.join('\n'));
   const droppedTableRows = value.split('\n').filter((line) => line.trim().startsWith('|')).length;
@@ -32,6 +44,10 @@ export function GroundTruthField({ value, onChange }: GroundTruthFieldProps) {
       <p className="ground-truth__title">Ground truth — one utterance per line, in spoken order:</p>
       <pre className="ground-truth__example">{EXAMPLE}</pre>
       <ul className="ground-truth__rules">
+        <li>
+          Every word spoken in the file, or the rest scores as errors. Long utterances stay on one line —
+          separate them with a blank line so a wrapped line still reads as one utterance.
+        </li>
         <li>
           Blank lines and <code>#</code> comments are ignored. Plain lines only — markdown table rows are dropped,
           so paste the utterance column, not the table.
@@ -49,7 +65,7 @@ export function GroundTruthField({ value, onChange }: GroundTruthFieldProps) {
         placeholder="One utterance per line, in the order they are spoken in the file"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        rows={6}
+        rows={rows}
       />
 
       {value.trim() !== '' && (

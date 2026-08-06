@@ -23,12 +23,15 @@ Read in order, pause ~2 seconds between each, press Stop at the end.
 The Lab's ground-truth box takes plain lines only — one utterance per line, in
 spoken order, blank lines and `#` comments ignored. Table rows are dropped, so
 copy this block, not the table above. The box previews exactly what it parsed
-before you run.
+before you run — check the utterance count and word count there, because a
+reference missing part of what was said scores the rest as insertions, and WER
+climbs past 100% looking like a model failure.
 
 ```
-# healthcare-practice-v1, en -> es
 Are you allergic to any medications?
+
 I have been having sharp chest pain for about three days, and it gets worse when I climb stairs or carry groceries.
+
 Take one tablet twice a day with food, and if you notice swelling in your face or trouble breathing, stop the medication and go to the emergency room.
 ```
 
