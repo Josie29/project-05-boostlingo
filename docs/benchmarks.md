@@ -49,7 +49,9 @@ cross-mode comparison:
   Cascade's provider only names the utterance at *commit*, later than the
   acoustic boundary, so the STT stream carries the `speech_stopped` instant
   forward and the `speechEnd` mark is backdated to it. The VAD's deliberation
-  therefore sits inside the measurement, where the listener experiences it.
+  therefore sits inside the stage *breakdown*, where the listener experiences
+  it — but not inside end-to-end, which cannot start there; see the residual
+  below.
 - **One clock per measurement.** Both modes' end-to-end is a client-clock
   subtraction: cascade from receiving the `speechEnd` mark to its first audio
   becoming audible; realtime from `input_audio_buffer.speech_stopped` to
@@ -57,12 +59,42 @@ cross-mode comparison:
   stage *breakdown* — they attribute the time, the client measures it. Stage
   medians therefore won't sum to the total; the remainder is wire time.
 
-Known residual, stated rather than corrected: realtime's closing edge is when
-the browser learns the server began sending audio, not when sound leaves the
-speaker, because per-turn audibility isn't observable over WebRTC. Cascade's
-closing edge *is* audibility (Web Audio schedules it). Realtime is therefore
-understated by its jitter-buffer playout — tens of ms against a target of
-1500 ms, and in the direction that flatters realtime.
+### Known residuals, stated rather than corrected
+
+**Both modes' opening edge is late, and this is the larger of the two gaps.**
+End-to-end is a client-clock subtraction, so it can only start at an instant the
+browser itself observed. For cascade that is the moment the `speechEnd` mark
+*arrives* (`CascadeLatencyTracker.handleEnvelope`: "Arrival is the earliest this
+client can know speech ended"); for realtime, the moment
+`input_audio_buffer.speech_stopped` arrives on the data channel. Neither is when
+the speaker stopped talking. Outside the number, in order: microphone worklet
+buffering, the upstream hops, the provider's own silence threshold, and — for
+cascade — `semantic_vad`'s deliberation before commit plus the mark's trip back
+down through the backend. The `speechEnd` mark is backdated far enough to put
+that deliberation inside the *breakdown*, but the client cannot subtract a server
+timestamp from a local one without breaking the one-clock-per-measurement rule
+above, so end-to-end starts on arrival regardless.
+
+Two consequences worth carrying into any reading of these tables. First, the
+figures understate what a speaker actually experiences, by roughly the VAD's
+deliberation window plus the round trip — which is why cascade's end-to-end lands
+close to the sum of its stage medians instead of comfortably above it. Second,
+cascade's opening edge crosses two extra hops (OpenAI→backend→browser) that
+realtime's direct WebRTC channel does not, so the two modes are understated by
+*different* amounts and the head-to-head is approximate in cascade's favor at
+this edge. Closing the gap honestly needs a client-side stamp for "the
+microphone went quiet" — a same-clock start that would serve both modes — which
+is deliberately not built: it measures the experience better but introduces a
+second VAD that disagrees with the provider's about where speech ends.
+
+**Realtime's closing edge is early**, by contrast: it is when the browser learns
+the server began sending audio, not when sound leaves the speaker, because
+per-turn audibility isn't observable over WebRTC. Cascade's closing edge *is*
+audibility (Web Audio schedules it). Realtime is therefore understated by its
+jitter-buffer playout — tens of ms against a target of 1500 ms, and in the
+direction that flatters realtime. This pulls opposite to the opening-edge bias
+above; neither is large enough to reorder the two modes, and no attempt is made
+to net them against each other.
 
 ## Results — Realtime
 

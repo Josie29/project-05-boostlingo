@@ -8,6 +8,20 @@ figures land in [benchmarks.md](benchmarks.md) from the live benchmark session
 
 ## Latency
 
+> **What "perceived latency" means here.** Every figure below and in
+> benchmarks.md is measured from the instant the *browser observes* that speech
+> ended — the arrival of cascade's `speechEnd` mark, or realtime's
+> `speech_stopped` event — not from the instant the speaker stopped talking. A
+> client-clock measurement can only start at something the client saw, and
+> mixing in a server timestamp would break the clock discipline the whole
+> instrumentation rests on. Microphone buffering, the upstream hops, and the
+> VAD's deliberation therefore fall outside the number, so a speaker experiences
+> a longer wait than these figures report — cascade by somewhat more than
+> realtime, since its opening edge crosses two extra hops. See
+> [benchmarks.md](benchmarks.md#known-residuals-stated-rather-than-corrected)
+> for the full accounting. The comparison between modes stays sound; the
+> absolute values are a floor, not the felt experience.
+
 **Realtime** (voice→voice, one model): the model starts speaking as soon as its
 VAD decides the turn ended. There are only two latency contributors — VAD
 end-of-turn detection and model time-to-first-audio — and neither is
