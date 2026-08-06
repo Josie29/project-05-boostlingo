@@ -30,7 +30,7 @@ using System.Threading.Channels;
 /// re-implementing it.
 /// </para>
 /// </remarks>
-public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInObserver, IAsyncDisposable
+public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInObserver, IProviderWarmup, IAsyncDisposable
 {
     private readonly ITtsProvider _ttsProvider;
     private readonly ILogger<TtsCascadeObserver> _logger;
@@ -160,6 +160,18 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
 
         return Task.FromResult<IReadOnlyCollection<string>>(superseded);
     }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Forwards to the underlying <see cref="ITtsProvider"/> if it has a connection worth
+    /// warming. This indirection is what lets <see cref="CascadePipeline"/> warm the TTS
+    /// stage while still knowing nothing about TTS: it only ever sees an
+    /// <see cref="ITranslationObserver"/> that happens to also implement
+    /// <see cref="IProviderWarmup"/>, exactly as it already does for
+    /// <see cref="ICascadeBargeInObserver"/> and <see cref="IAsyncDisposable"/>.
+    /// </remarks>
+    public Task WarmUpAsync(CancellationToken cancellationToken) =>
+        _ttsProvider is IProviderWarmup warmable ? warmable.WarmUpAsync(cancellationToken) : Task.CompletedTask;
 
     /// <summary>
     /// Stops accepting new work, gives the pump <see cref="DisposeDrainTimeout"/> to

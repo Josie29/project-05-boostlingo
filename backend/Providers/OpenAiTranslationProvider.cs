@@ -23,7 +23,7 @@ using System.Text.Json.Serialization;
 /// </remarks>
 public sealed class OpenAiTranslationProvider(
     HttpClient httpClient, IConfiguration configuration, ILogger<OpenAiTranslationProvider> logger)
-    : ITranslationProvider
+    : ITranslationProvider, IProviderWarmup
 {
     /// <summary>OpenAI chat model used for cascade-mode machine translation.</summary>
     public const string Model = "gpt-4o-mini";
@@ -129,6 +129,33 @@ public sealed class OpenAiTranslationProvider(
                 }
             }
         }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <c>GET /v1/models</c> is the cheapest authenticated OpenAI call there is - it
+    /// lists model ids, runs no inference, and costs no tokens - so it establishes the
+    /// pooled TLS connection <see cref="TranslateAsync"/> will reuse without buying
+    /// anything. Skipped outright with no key configured: the session can't translate
+    /// anyway, and an unauthenticated warm-up would only add noise to OpenAI's logs.
+    /// </remarks>
+    public Task WarmUpAsync(CancellationToken cancellationToken)
+    {
+        var apiKey = configuration["OPENAI_API_KEY"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return Task.CompletedTask;
+        }
+
+        return ProviderConnectionWarmup.SendAsync(
+            httpClient, () => BuildWarmUpRequest(apiKey), stageName: "Machine translation", logger, cancellationToken);
+    }
+
+    private static HttpRequestMessage BuildWarmUpRequest(string apiKey)
+    {
+        var httpRequest = new HttpRequestMessage(HttpMethod.Get, "models");
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        return httpRequest;
     }
 
     private static HttpRequestMessage BuildRequest(TranslationRequest request, string apiKey)

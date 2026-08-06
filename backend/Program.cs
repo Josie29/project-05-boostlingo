@@ -1,7 +1,16 @@
+using System.Net;
+
 // Load repo-root .env before config is built; real shell env vars still win.
 DotNetEnv.Env.TraversePath().NoClobber().Load();
 
 var builder = WebApplication.CreateBuilder(args);
+
+// How long a warmed connection to an MT/TTS provider stays usable. Well past
+// HttpClientFactory's 2-minute handler default, which would otherwise retire the pool
+// IProviderWarmup just warmed and make an utterance mid-conversation pay a fresh
+// DNS/TCP/TLS handshake inside its own measured latency. Still bounded, so DNS changes
+// are eventually picked up.
+var providerConnectionLifetime = TimeSpan.FromMinutes(10);
 
 // Enums cross the metrics wire as the same lowercase strings the frontend's
 // TypeScript unions use ("realtime"/"cascade", "source"/"target"), not integers or
@@ -40,16 +49,10 @@ if (!StageModels.IsSupportedMtProvider(translationProvider))
         $"Unrecognized TRANSLATION_PROVIDER '{translationProvider}'. Valid values: openai, anthropic.");
 }
 
-builder.Services.AddHttpClient<OpenAiTranslationProvider>(client =>
-{
-    client.BaseAddress = new Uri("https://api.openai.com/v1/");
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
-builder.Services.AddHttpClient<AnthropicTranslationProvider>(client =>
-{
-    client.BaseAddress = new Uri("https://api.anthropic.com/v1/");
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
+ConfigureProviderClient(
+    builder.Services.AddHttpClient<OpenAiTranslationProvider>(), "https://api.openai.com/v1/", providerConnectionLifetime);
+ConfigureProviderClient(
+    builder.Services.AddHttpClient<AnthropicTranslationProvider>(), "https://api.anthropic.com/v1/", providerConnectionLifetime);
 builder.Services.AddScoped<ITranslationProviderSelector, TranslationProviderSelector>();
 
 // Session-metrics persistence (#10 revisited; docs/tech-stack.md's amended entry):
@@ -66,11 +69,8 @@ builder.Services.AddSingleton(new TranslationProviderName(translationProvider));
 // TTS (text-to-speech; #7) provider. Typed HttpClient, same pattern as
 // ITranslationProvider above - OPENAI_API_KEY is attached per-request inside
 // OpenAiTtsProvider and never exposed to callers of ITtsProvider.
-builder.Services.AddHttpClient<ITtsProvider, OpenAiTtsProvider>(client =>
-{
-    client.BaseAddress = new Uri("https://api.openai.com/v1/");
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
+ConfigureProviderClient(
+    builder.Services.AddHttpClient<ITtsProvider, OpenAiTtsProvider>(), "https://api.openai.com/v1/", providerConnectionLifetime);
 
 // TTS cascade glue (#7): observes streamed translation chunks and turns them into
 // tts.audio.start/binary frames/tts.audio.end on the client. Scoped, not singleton -
@@ -112,6 +112,41 @@ if (translationProvider == "anthropic" && string.IsNullOrWhiteSpace(app.Configur
 }
 
 app.Run();
+
+/// <summary>
+/// Applies the shared connection settings every per-utterance MT/TTS provider client
+/// wants: a long-lived pooled connection for <see cref="IProviderWarmup"/> to warm, and
+/// HTTP/2 where the provider offers it.
+/// </summary>
+/// <param name="clientBuilder">The typed-client builder to configure.</param>
+/// <param name="baseAddress">The provider's API base address.</param>
+/// <param name="connectionLifetime">How long a pooled connection (and the handler owning
+/// it) stays alive before rotation.</param>
+/// <returns>The same builder, for chaining.</returns>
+static IHttpClientBuilder ConfigureProviderClient(
+    IHttpClientBuilder clientBuilder, string baseAddress, TimeSpan connectionLifetime) =>
+    clientBuilder
+        .ConfigureHttpClient(client =>
+        {
+            client.BaseAddress = new Uri(baseAddress);
+            client.Timeout = TimeSpan.FromSeconds(30);
+            // Requested, not required: negotiated over ALPN during the TLS handshake and
+            // silently downgraded to HTTP/1.1 if the provider declines, so this can't
+            // break a provider that doesn't speak h2. Worth requesting because h2
+            // multiplexes concurrent utterances over the one warmed connection instead
+            // of opening a second cold one under load.
+            client.DefaultRequestVersion = HttpVersion.Version20;
+            client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            // Both matter: the idle timeout (1 minute by default) would drop the warmed
+            // connection during a lull between utterances, and the lifetime bounds how
+            // long a single connection is reused.
+            PooledConnectionIdleTimeout = connectionLifetime,
+            PooledConnectionLifetime = connectionLifetime,
+        })
+        .SetHandlerLifetime(connectionLifetime);
 
 /// <summary>
 /// Logs, at startup, whether an OpenAI API key was found in configuration

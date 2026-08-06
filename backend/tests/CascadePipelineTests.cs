@@ -623,6 +623,52 @@ public class CascadePipelineTests
         Assert.Equal(expectedText, payload.Text);
     }
 
+    /// <summary>
+    /// Confirms starting a session opens the MT and TTS providers' connections up front,
+    /// reaching TTS through its observer rather than knowing TTS exists. Without this,
+    /// the first utterance of every session pays DNS/TCP/TLS to each provider inside its
+    /// own measured latency - the cost that lands in the mtFirstToken and ttsFirstByte
+    /// spans the latency panel reports.
+    /// </summary>
+    [Fact]
+    public async Task OnSessionStartedAsync_WarmsMtAndTtsProviderConnections()
+    {
+        var translationProvider = new WarmableTranslationProvider();
+        var ttsObserver = new WarmableTranslationObserver();
+        var pipeline = CreatePipeline(
+            new FakeSttProvider(new FakeSttStream()), translationProvider, [ttsObserver]);
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), new FakeEventSink(), TestTimeout());
+
+        // Warming is deliberately fire-and-forget, so both waits (not a synchronous
+        // assertion) are what prove it was actually started rather than skipped.
+        await translationProvider.Warmed.WaitAsync(TestTimeout());
+        await ttsObserver.Warmed.WaitAsync(TestTimeout());
+    }
+
+    /// <summary>
+    /// Confirms a provider whose warm-up fails - offline, bad key, provider down - still
+    /// leaves a fully working session that transcribes audio. Warming is purely an
+    /// optimization, so a session refusing to start (or silently dropping audio) because
+    /// a throwaway request failed would be a strict regression on the behavior that
+    /// existed before it.
+    /// </summary>
+    [Fact]
+    public async Task OnSessionStartedAsync_StartsWorkingSession_WhenWarmUpThrows()
+    {
+        var stream = new FakeSttStream();
+        var pipeline = CreatePipeline(
+            new FakeSttProvider(stream), new WarmableTranslationProvider(throwOnWarmUp: true));
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, TestTimeout());
+        var chunk = new byte[] { 4, 3, 2, 1 };
+        await pipeline.OnAudioChunkAsync(chunk, sink, TestTimeout());
+
+        Assert.Single(stream.SentAudio);
+        Assert.Equal(chunk, stream.SentAudio[0]);
+    }
+
     private static CascadePipeline CreatePipeline(
         ISttProvider provider,
         ITranslationProvider? translationProvider = null,
@@ -816,6 +862,67 @@ file sealed class FakeTtsProvider(Func<TtsRequest, IAsyncEnumerable<TtsAudioChun
 
     public IAsyncEnumerable<TtsAudioChunk> SynthesizeAsync(TtsRequest request, CancellationToken cancellationToken) =>
         respond(request);
+}
+
+/// <summary>
+/// An <see cref="ITranslationProvider"/> that also opts into <see cref="IProviderWarmup"/>,
+/// so tests can observe whether the pipeline warmed it - or, with
+/// <paramref name="throwOnWarmUp"/>, that a warm-up failure is contained.
+/// </summary>
+/// <param name="throwOnWarmUp">Whether <c>WarmUpAsync</c> should throw, standing in for a
+/// provider that is unreachable when the session starts.</param>
+file sealed class WarmableTranslationProvider(bool throwOnWarmUp = false) : ITranslationProvider, IProviderWarmup
+{
+    private readonly TaskCompletionSource _warmed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes once <see cref="WarmUpAsync"/> has been called.</summary>
+    public Task Warmed => _warmed.Task;
+
+    /// <summary>Never exercised by the warm-up tests - they never let an utterance settle.</summary>
+    public IAsyncEnumerable<string> TranslateAsync(TranslationRequest request, CancellationToken cancellationToken) =>
+        NoTokens();
+
+    public Task WarmUpAsync(CancellationToken cancellationToken)
+    {
+        _warmed.TrySetResult();
+        if (throwOnWarmUp)
+        {
+            // Synchronously, not as a faulted task: the harsher of the two shapes an
+            // implementation could fail in, and the one that would escape a try/catch
+            // written around the await instead of around the call.
+            throw new InvalidOperationException("Warm-up failed.");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static async IAsyncEnumerable<string> NoTokens()
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+}
+
+/// <summary>
+/// An <see cref="ITranslationObserver"/> that opts into <see cref="IProviderWarmup"/> the
+/// way <see cref="TtsCascadeObserver"/> does - the seam that lets the pipeline warm the
+/// TTS stage without depending on it.
+/// </summary>
+file sealed class WarmableTranslationObserver : ITranslationObserver, IProviderWarmup
+{
+    private readonly TaskCompletionSource _warmed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes once <see cref="WarmUpAsync"/> has been called.</summary>
+    public Task Warmed => _warmed.Task;
+
+    public Task OnTranslationChunkAsync(
+        TranslationChunk chunk, ICascadeEventSink events, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task WarmUpAsync(CancellationToken cancellationToken)
+    {
+        _warmed.TrySetResult();
+        return Task.CompletedTask;
+    }
 }
 
 /// <summary>Records every chunk it's notified of, so tests can confirm the TTS/#7 observer seam actually fires.</summary>

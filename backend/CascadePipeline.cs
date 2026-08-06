@@ -122,6 +122,13 @@ public sealed class CascadePipeline(
         // the exact same value rather than re-deriving it (code-review fix).
         _sttLanguageHint = Languages.Find(config.SourceLang)?.SttLanguageHint ?? config.SourceLang;
 
+        // Started before the STT stream opens, and deliberately not awaited: MT and TTS
+        // both reach their providers over one-request-per-utterance HTTPS, so this puts
+        // their DNS/TCP/TLS handshakes in the shadow of the STT WebSocket handshake below
+        // instead of inside the first utterance's measured latency. Warming is an
+        // optimization, never a precondition - see IProviderWarmup.
+        _ = WarmUpProvidersAsync(cancellationToken);
+
         try
         {
             _sttStream = await sttProvider.StartStreamAsync(
@@ -141,6 +148,42 @@ public sealed class CascadePipeline(
         _sessionStopwatch.Start();
         _translationPumpTask = PumpTranslationsAsync(events, _pumpCts.Token);
         _segmentPumpTask = PumpSegmentsAsync(_sttStream, events, _pumpCts.Token);
+    }
+
+    /// <summary>
+    /// Opens each downstream provider's connection ahead of the first utterance. Reaches
+    /// the MT provider directly and the TTS one through whichever
+    /// <see cref="ITranslationObserver"/> owns it (<see cref="TtsCascadeObserver"/>
+    /// forwards), so this class still needs no knowledge that a TTS stage exists - the
+    /// same optional-interface discovery <see cref="DisposeObserversAsync"/> and
+    /// <see cref="HandleBargeInAsync"/> already use.
+    /// </summary>
+    /// <param name="cancellationToken">Propagates session cancellation - a session that
+    /// ends before its warm-ups land simply abandons them.</param>
+    private async Task WarmUpProvidersAsync(CancellationToken cancellationToken)
+    {
+        var warmable = translationObservers.OfType<IProviderWarmup>().ToList();
+        if (_translationProvider is IProviderWarmup translationWarmup)
+        {
+            warmable.Add(translationWarmup);
+        }
+
+        // Concurrently, not in sequence: each one is an independent handshake to its own
+        // connection pool (AddHttpClient gives every typed client its own handler), and
+        // the point is for all of them to finish inside the STT handshake's shadow.
+        await Task.WhenAll(warmable.Select(async provider =>
+        {
+            try
+            {
+                await provider.WarmUpAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // IProviderWarmup's contract is that implementations never throw; this is
+                // the backstop keeping a misbehaving one from faulting a task nothing awaits.
+                logger.LogDebug(ex, "Provider connection warm-up threw and was ignored.");
+            }
+        }));
     }
 
     /// <inheritdoc />

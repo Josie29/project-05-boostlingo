@@ -24,7 +24,7 @@ using System.Text.Json.Serialization;
 /// own test seam.
 /// </remarks>
 public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration configuration, ILogger<OpenAiTtsProvider> logger)
-    : ITtsProvider
+    : ITtsProvider, IProviderWarmup
 {
     /// <summary>OpenAI TTS model used for cascade-mode speech synthesis. Chosen for its
     /// low-latency streaming support, which is what lets synthesis start on a phrase
@@ -142,6 +142,33 @@ public sealed class OpenAiTtsProvider(HttpClient httpClient, IConfiguration conf
                 }
             }
         }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Warms this provider's own pool, not a shared one: <c>AddHttpClient</c> gives every
+    /// typed client its own message handler, so the connection
+    /// <see cref="OpenAiTranslationProvider.WarmUpAsync"/> opens to the same host is
+    /// invisible here. Uses <c>GET /v1/models</c> for the same reason that provider does -
+    /// authenticated, no inference, no tokens.
+    /// </remarks>
+    public Task WarmUpAsync(CancellationToken cancellationToken)
+    {
+        var apiKey = configuration["OPENAI_API_KEY"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return Task.CompletedTask;
+        }
+
+        return ProviderConnectionWarmup.SendAsync(
+            httpClient, () => BuildWarmUpRequest(apiKey), stageName: "Text-to-speech", logger, cancellationToken);
+    }
+
+    private static HttpRequestMessage BuildWarmUpRequest(string apiKey)
+    {
+        var httpRequest = new HttpRequestMessage(HttpMethod.Get, "models");
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        return httpRequest;
     }
 
     private static HttpRequestMessage BuildRequest(TtsRequest request, string apiKey)

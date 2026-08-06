@@ -22,7 +22,7 @@ using System.Text.Json.Serialization;
 /// </remarks>
 public sealed class AnthropicTranslationProvider(
     HttpClient httpClient, IConfiguration configuration, ILogger<AnthropicTranslationProvider> logger)
-    : ITranslationProvider
+    : ITranslationProvider, IProviderWarmup
 {
     /// <summary>Anthropic model used when <c>ANTHROPIC_MT_MODEL</c> isn't set.</summary>
     public const string DefaultModel = "claude-haiku-4-5";
@@ -135,6 +135,33 @@ public sealed class AnthropicTranslationProvider(
                 }
             }
         }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <c>GET /v1/models</c> is Anthropic's equivalent of the endpoint
+    /// <see cref="OpenAiTranslationProvider.WarmUpAsync"/> warms with: authenticated,
+    /// no inference, no tokens. Kept here rather than shared with that provider because
+    /// the auth headers differ (see <see cref="BuildRequest"/>).
+    /// </remarks>
+    public Task WarmUpAsync(CancellationToken cancellationToken)
+    {
+        var apiKey = configuration["ANTHROPIC_API_KEY"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return Task.CompletedTask;
+        }
+
+        return ProviderConnectionWarmup.SendAsync(
+            httpClient, () => BuildWarmUpRequest(apiKey), stageName: "Machine translation", logger, cancellationToken);
+    }
+
+    private static HttpRequestMessage BuildWarmUpRequest(string apiKey)
+    {
+        var httpRequest = new HttpRequestMessage(HttpMethod.Get, "models");
+        httpRequest.Headers.Add("x-api-key", apiKey);
+        httpRequest.Headers.Add("anthropic-version", ApiVersion);
+        return httpRequest;
     }
 
     private HttpRequestMessage BuildRequest(TranslationRequest request, string apiKey)

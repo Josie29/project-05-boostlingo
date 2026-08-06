@@ -272,6 +272,55 @@ public class OpenAiTtsProviderTests
         await Assert.ThrowsAsync<TtsProviderException>(ConsumeAsync);
     }
 
+    /// <summary>
+    /// Confirms the warm-up sends exactly one authenticated request carrying no body.
+    /// A body would mean it had become a real synthesis call - billed, and slow enough
+    /// to delay the session start it is supposed to run underneath - which is the one
+    /// way this optimization could turn into a cost.
+    /// </summary>
+    [Fact]
+    public async Task WarmUpAsync_SendsOneAuthenticatedRequestWithNoBody()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler([1, 2, 3]);
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        await provider.WarmUpAsync(CancellationToken.None);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("Bearer sk-test", request.Authorization);
+        Assert.Empty(request.Body);
+    }
+
+    /// <summary>
+    /// Confirms a keyless environment warms nothing. Every backend test and every local
+    /// run without OPENAI_API_KEY starts sessions; without this guard each one would fire
+    /// a pointless unauthenticated request at OpenAI on session start.
+    /// </summary>
+    [Fact]
+    public async Task WarmUpAsync_MissingApiKey_SendsNothing()
+    {
+        var handler = new FakeChunkedAudioHttpMessageHandler([1, 2, 3]);
+        var provider = CreateProvider(handler, apiKey: null);
+
+        await provider.WarmUpAsync(CancellationToken.None);
+
+        Assert.Empty(handler.Requests);
+    }
+
+    /// <summary>
+    /// Confirms a provider that is unreachable at session start reports no failure of its
+    /// own - the pipeline fires warm-ups without awaiting them, so a throwing one would
+    /// surface as an unobserved task fault rather than anything a session could handle.
+    /// </summary>
+    [Fact]
+    public async Task WarmUpAsync_ProviderUnreachable_DoesNotThrow()
+    {
+        var handler = new ThrowingHttpMessageHandler();
+        var provider = CreateProvider(handler, apiKey: "sk-test");
+
+        await provider.WarmUpAsync(CancellationToken.None);
+    }
+
     private static OpenAiTtsProvider CreateProvider(HttpMessageHandler handler, string? apiKey, TimeSpan? timeout = null)
     {
         var configuration = new ConfigurationBuilder()
@@ -285,6 +334,13 @@ public class OpenAiTtsProviderTests
 
         return new OpenAiTtsProvider(httpClient, configuration, NullLogger<OpenAiTtsProvider>.Instance);
     }
+}
+
+/// <summary>Fails every send outright, standing in for a provider that can't be reached at all.</summary>
+file sealed class ThrowingHttpMessageHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        throw new HttpRequestException("Connection refused.");
 }
 
 /// <summary>
