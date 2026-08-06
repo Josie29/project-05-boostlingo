@@ -34,6 +34,30 @@ public class SqliteSessionMetricsStoreTests : IDisposable
         ]);
 
     /// <summary>
+    /// Wiping the database mid-run left every Lab request 500ing, because the schema only
+    /// ever ran at startup. Catches a return to constructor-only schema creation.
+    /// </summary>
+    [Fact]
+    public async Task SurvivesTheDatabaseFileBeingDeletedUnderneathIt()
+    {
+        var store = new SqliteSessionMetricsStore(_dbPath);
+        await store.SaveConversationAsync(
+            SampleReport(), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"),
+            CancellationToken.None);
+
+        File.Delete(_dbPath);
+
+        Assert.Empty(await store.ListConversationsAsync(CancellationToken.None));
+        Assert.Empty((await store.GetSummaryAsync(CancellationToken.None)).Groups);
+
+        // Empty, but still writable - not just quietly broken.
+        await store.SaveConversationAsync(
+            SampleReport("conv-2"), new ResolvedStageConfig("openai", "gpt-4o-mini-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"),
+            CancellationToken.None);
+        Assert.Single(await store.ListConversationsAsync(CancellationToken.None));
+    }
+
+    /// <summary>
     /// Catches the bug where a benchmark session recorded in the app never shows up
     /// afterwards: a saved conversation must be listed back with its language pair, the
     /// server-stamped MT provider, and per-mode utterance counts intact.

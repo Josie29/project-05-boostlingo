@@ -12,6 +12,7 @@ using Microsoft.Data.Sqlite;
 public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
 {
     private readonly string _connectionString;
+    private readonly string _databasePath;
 
     /// <summary>
     /// Creates the store, its containing directory, and the schema if missing. Schema
@@ -23,7 +24,8 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     /// <param name="databasePath">Filesystem path of the SQLite database file.</param>
     public SqliteSessionMetricsStore(string databasePath)
     {
-        var directory = Path.GetDirectoryName(Path.GetFullPath(databasePath));
+        _databasePath = Path.GetFullPath(databasePath);
+        var directory = Path.GetDirectoryName(_databasePath);
         if (!string.IsNullOrEmpty(directory))
         {
             Directory.CreateDirectory(directory);
@@ -40,6 +42,39 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
 
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
+        EnsureSchema(connection);
+    }
+
+    /// <summary>
+    /// Opens a connection, recreating the schema if the file was deleted under a running
+    /// process - SQLite silently makes a fresh table-less one, so every query 500s where
+    /// the honest answer is "no runs yet". A real database is never 0 bytes.
+    /// </summary>
+    /// <param name="cancellationToken">Propagates request cancellation.</param>
+    /// <returns>An open connection whose schema is guaranteed present.</returns>
+    private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var info = new FileInfo(_databasePath);
+        var needsSchema = !info.Exists || info.Length == 0;
+        if (needsSchema)
+        {
+            // Pooled connections still hold handles to the deleted file.
+            SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
+        }
+
+        var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        if (needsSchema)
+        {
+            EnsureSchema(connection);
+        }
+
+        return connection;
+    }
+
+    /// <summary>Creates any missing table and brings an older file's columns up to date.</summary>
+    private static void EnsureSchema(SqliteConnection connection)
+    {
         using (var command = connection.CreateCommand())
         {
             command.CommandText = Schema;
@@ -146,8 +181,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     public async Task SaveConversationAsync(
         ConversationMetricsReport report, ResolvedStageConfig stageConfig, CancellationToken cancellationToken)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
         // The delete-and-reinsert below must not silently unpin a conversation that
@@ -250,8 +284,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     /// <inheritdoc />
     public async Task<IReadOnlyList<ConversationListing>> ListConversationsAsync(CancellationToken cancellationToken)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
 
         // Per-conversation, per-mode end-to-end populations for the median columns
         // (SQLite has no median; computed in C# like GetSummaryAsync's stats).
@@ -318,8 +351,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     public async Task<ConversationDetail?> GetConversationDetailAsync(
         string conversationId, CancellationToken cancellationToken)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
 
         ConversationDetail? header = null;
         await using (var command = connection.CreateCommand())
@@ -420,8 +452,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     /// <inheritdoc />
     public async Task SetBaselineAsync(IReadOnlyList<string> conversationIds, CancellationToken cancellationToken)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
         await using (var clear = connection.CreateCommand())
@@ -451,8 +482,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
     public async Task<MetricsSummary> GetSummaryAsync(
         CancellationToken cancellationToken, BaselineScope scope = BaselineScope.All, bool collapseMtProvider = false)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
 
         var scopeFilter = scope switch
         {

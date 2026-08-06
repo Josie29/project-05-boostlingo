@@ -78,9 +78,8 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('LabPanel', () => {
-  // Catches the baseline card showing numbers from the wrong scope (the pane
-  // must report what's pinned, not a pooled all-sessions median) or dropping the
-  // stage breakdown under the headline.
+  // Catches the card reporting a pooled all-sessions median instead of what's
+  // pinned, or dropping the stage breakdown.
   it('renders the pinned baseline median and stage breakdown for a pinned mode', async () => {
     render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
 
@@ -89,14 +88,12 @@ describe('LabPanel', () => {
     const pane = within(screen.getByRole('region', { name: 'Baseline' }));
     expect(pane.getByText('2457ms')).toBeInTheDocument();
     expect(pane.getByText('Generating voice').parentElement).toHaveTextContent('998ms');
-    // ttsEnd elapses after first audio out, so it sits under the rule as an
-    // aside — never as a row that reads like part of the headline latency.
+    // ttsEnd is past first audio out, so it sits under the rule, not in the stack.
     expect(pane.getByText('Not latency — the listener is already hearing it.')).toBeInTheDocument();
     expect(pane.getByText('Audio plays out').closest('ul')).toHaveAttribute('data-after', 'true');
   });
 
-  // Catches the pane collapsing to one card when only one mode is pinned: both
-  // modes must always hold their space, the unpinned one telling you how to fill it.
+  // Catches the pane collapsing to one card when only one mode is pinned.
   it('keeps a card for an unpinned mode with a prompt to pin one', async () => {
     render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
     await screen.findByText('Cascade');

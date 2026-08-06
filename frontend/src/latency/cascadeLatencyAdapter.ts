@@ -37,7 +37,7 @@ export interface FirstChunkTiming {
 
 /** Collaborators the tracker needs; swapped in tests for a deterministic clock. */
 export interface CascadeLatencyTrackerDeps {
-  /** The same local clock `AudioPlaybackQueue` stamps its timings with — real `performance.now()` in production. */
+  /** The same local clock `AudioPlaybackQueue` stamps with — `performance.now()` in production. */
   now: () => number;
 }
 
@@ -81,37 +81,23 @@ function readLatencyMark(rawEvent: unknown): { utteranceId: string; stage: Casca
 /**
  * Reduces one utterance's accumulated marks/timing into a {@link LatencyReport}.
  *
- * Per-stage `ms` is the delta between one stage's `serverTimeMs` and the
- * chronologically preceding mark this utterance has — a server-clock-only
- * subtraction, never a client-minus-server one. A stage with no earlier mark to
- * diff against (including the very first mark this utterance has, whichever
- * stage that happens to be) is simply omitted from `stages` rather than
- * reported as a zero or `NaN` placeholder, so a dropped/late mark degrades the
- * breakdown gracefully instead of corrupting it. A stage's `ms` is therefore
- * "the interval that ended at this mark", whichever mark opened it — not
- * necessarily the canonical predecessor, which may be missing or later.
+ * Per-stage `ms` is the interval that ended at that mark, measured from the
+ * chronologically preceding one — always a server-clock-only subtraction. A mark
+ * with nothing earlier to diff against is omitted rather than reported as zero
+ * or `NaN`, so a dropped mark degrades the breakdown instead of corrupting it.
  *
- * `endToEndMs` is the brief's perceived latency — speech end → first audio out
- * — measured end to end on the *client's* clock: from this client receiving the
- * `speechEnd` mark to its first audio actually becoming audible. Both readings
- * come from `deps.now()`, so it stays a same-clock subtraction, and unlike the
- * earlier server-span-plus-playback formula it leaves no leg uncounted: the
- * round trip a listener genuinely waits through is inside the number rather
- * than falling in the gap between a server stamp and a client one. The
- * server-clock stage marks still carry the breakdown; they attribute the time,
- * this measures it. `null` until both edges are known.
+ * `endToEndMs` is the brief's perceived latency, measured entirely on the
+ * client's clock: receiving the `speechEnd` mark → first audio audible. Unlike
+ * the earlier server-span-plus-playback sum, that leaves no network leg
+ * uncounted. Server marks attribute time within the pipeline; this measures it.
  */
 function buildReport(utteranceId: string, state: UtteranceLatencyState): LatencyReport {
   const stages: LatencyStageTiming[] = [];
   let previousMarkMs: number | null = null;
 
-  // Chronological, not `CASCADE_STAGE_ORDER`: the pipeline overlaps. TTS
-  // synthesizes each sentence as translation streams (`TtsCascadeObserver`
-  // calls `SynthesizePhraseAsync` from the chunker on non-final chunks), so a
-  // multi-sentence utterance can produce ttsFirstByte before mtFinal. Diffing
-  // in canonical order would then report a negative duration; diffing in
-  // timestamp order always yields a real, non-negative interval ending at that
-  // mark. Ties break on canonical order so same-millisecond marks stay readable.
+  // Chronological, not `CASCADE_STAGE_ORDER`: the pipeline overlaps (TTS
+  // synthesizes each sentence while translation still streams), so ttsFirstByte
+  // can precede mtFinal and canonical order would report that as negative.
   const marked = CASCADE_STAGE_ORDER.map((stage, index) => ({ stage, index, markMs: state.marks[stage] }))
     .filter((entry): entry is { stage: CascadeStage; index: number; markMs: number } => entry.markMs !== undefined)
     .sort((a, b) => a.markMs - b.markMs || a.index - b.index);
@@ -175,9 +161,8 @@ export class CascadeLatencyTracker {
 
     const state = this.getOrCreate(mark.utteranceId);
     state.marks[mark.stage] = mark.serverTimeMs;
-    // The speechEnd mark's *arrival* is the earliest this client can know speech
-    // ended, so it opens the client-clock window. Its server timestamp still
-    // anchors the stage breakdown; the two clocks stay unmixed.
+    // Arrival is the earliest this client can know speech ended. The mark's
+    // server timestamp still anchors the breakdown; the clocks stay unmixed.
     if (mark.stage === 'speechEnd' && state.clientSpeechEndAtMs === null) {
       state.clientSpeechEndAtMs = this.now();
     }

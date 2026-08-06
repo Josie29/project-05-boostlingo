@@ -42,11 +42,9 @@ describe('CascadeLatencyTracker', () => {
     expect(report?.stages.some((s) => Number.isNaN(s.ms))).toBe(false);
   });
 
-  // The pipeline overlaps: TtsCascadeObserver synthesizes each sentence as the
-  // translation streams, so a multi-sentence utterance can produce ttsFirstByte
-  // before mtFinal. Diffing in canonical stage order would report that as a
-  // negative "Generating voice" and a mtFinal span that runs backwards; catches
-  // any return to canonical-order diffing.
+  // TTS synthesizes each sentence while translation still streams, so ttsFirstByte
+  // can precede mtFinal — which canonical-order diffing renders as a negative
+  // "Generating voice". Catches a return to canonical-order diffing.
   it('reports non-negative intervals when marks arrive out of canonical stage order', () => {
     const tracker = new CascadeLatencyTracker();
     tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_000));
@@ -75,15 +73,12 @@ describe('CascadeLatencyTracker', () => {
     expect(report).toEqual({ utteranceId: 'utt_1', stages: [], endToEndMs: null });
   });
 
-  // The brief measures perceived latency at the listener: speech end -> first
-  // audio out. Catches a return to the server-span-plus-playback formula, which
-  // left both network legs (client->server audio, server->client audio) outside
-  // the number the benchmark reports.
+  // Catches a return to the server-span-plus-playback formula, which left both
+  // network legs outside the number the benchmark reports.
   it('measures endToEndMs on the client clock, from learning speech ended to audio being audible', () => {
     let clientNow = 5_000;
     const tracker = new CascadeLatencyTracker({ now: () => clientNow });
-    // Server stamps are deliberately far from the client clock: mixing the two
-    // would produce a wildly wrong total rather than a subtly wrong one.
+    // Server stamps far from the client clock, so mixing them fails loudly.
     tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_700_000_000_000));
     clientNow = 5_400;
     tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 1_700_000_000_800));
@@ -96,8 +91,8 @@ describe('CascadeLatencyTracker', () => {
     expect(report.endToEndMs).toBe(900);
   });
 
-  // Catches the window opening on a later speechEnd re-delivery (a duplicate or
-  // retried mark) and silently shortening every utterance's measured latency.
+  // Catches a duplicate speechEnd re-opening the window and shortening every
+  // measured latency.
   it('opens the window at the first speechEnd mark, not a later duplicate', () => {
     let clientNow = 1_000;
     const tracker = new CascadeLatencyTracker({ now: () => clientNow });

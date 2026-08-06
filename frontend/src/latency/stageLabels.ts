@@ -1,21 +1,17 @@
 import { CASCADE_STAGE_ORDER } from './cascadeStages';
 
 /**
- * Presentation-only naming for latency stages. The UI-facing latency domain
- * treats stage names as opaque strings (see `cascadeStages.ts`); this module is
- * the one place that assigns them human wording, and every lookup falls back to
- * the raw name so an unrecognized stage degrades to something readable rather
- * than disappearing.
+ * Presentation-only naming for latency stages — the one place stage names get
+ * human wording, so the latency domain itself can keep treating them as opaque
+ * strings (`cascadeStages.ts`). Every lookup falls back to the raw name.
  *
- * Labels name the *work in the interval*, not a moment: each stage's `ms` is the
- * delta from the preceding mark (`cascadeLatencyAdapter.buildReport`), so
- * "Recognizing speech: 184ms" is the honest reading of the number.
+ * Labels name the *work in the interval*, not a moment: each stage's `ms` is a
+ * delta from the preceding mark, so "Recognizing speech: 184ms" reads true.
  */
 /**
  * Whether a stage falls inside the brief's perceived-latency window — speech end
- * → first audio out (`docs/BRIEF.md`). Everything up to first audio is time the
- * listener spends waiting; anything after it elapses while they're already
- * hearing the interpretation, so it must never be added to a latency figure.
+ * → first audio out. Anything after it elapses while the listener is already
+ * hearing the interpretation, so it can never be part of a latency figure.
  */
 export const StageScope = {
   Perceived: 'perceived',
@@ -27,20 +23,15 @@ export type StageScope = (typeof StageScope)[keyof typeof StageScope];
 interface StageCopy {
   label: string;
   /**
-   * What the mark ending this interval means — surfaced as the row's tooltip.
-   * Deliberately names only the *end* of the span: a stage's duration is measured
-   * from whichever mark chronologically preceded it, and marks go missing (a
-   * short utterance with no STT partial, a provider that emits no first-token
-   * event), so naming a fixed predecessor would state something untrue on those
-   * utterances. Stored data shows this is routine, not theoretical — sttFinal has
-   * more samples than sttFirstPartial.
+   * Tooltip naming only where the interval *ends*: it is measured from whichever
+   * mark actually preceded it, and marks go missing routinely, so naming a fixed
+   * predecessor would be untrue on those utterances.
    */
   span: string;
   scope: StageScope;
 }
 
 const STAGE_COPY: Record<string, StageCopy> = {
-  // Cascade marks (`CASCADE_STAGE_ORDER`).
   speechEnd: {
     label: 'Speech ends',
     span: 'the VAD committed the turn — the anchor every later span is measured from',
@@ -76,8 +67,8 @@ const STAGE_COPY: Record<string, StageCopy> = {
     span: 'ends when the audio finishes — elapses while the listener is already hearing it',
     scope: StageScope.AfterFirstAudio,
   },
-  // Realtime stages (`realtimeLatencyAdapter`) — one model, so no STT/MT/TTS split.
-  // Both land inside the window: together they are exactly the perceived latency.
+  // Realtime (`realtimeLatencyAdapter`): one model, and the two together are
+  // exactly the perceived latency.
   responseCreated: {
     label: 'Model responds',
     span: 'ends when the model starts its turn',
@@ -90,11 +81,7 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
 };
 
-/**
- * Display order across both modes. Cascade comes from the protocol constant so
- * the two can't drift; realtime's two stages follow. A mode's stages are never
- * listed together, so the concatenation only ever orders one mode at a time.
- */
+/** Cascade order comes from the protocol constant so the two can't drift; a list only ever holds one mode's stages. */
 const DISPLAY_ORDER: readonly string[] = [...CASCADE_STAGE_ORDER, 'responseCreated', 'audioStart'];
 
 /** Human wording for a stage, or the raw name if it isn't one we have copy for. */
@@ -107,21 +94,14 @@ export function stageSpan(stage: string): string | undefined {
   return STAGE_COPY[stage]?.span;
 }
 
-/**
- * Whether a stage counts toward perceived latency. An unrecognized stage is
- * treated as perceived — the same default every known stage but `ttsEnd` has, and
- * the one that keeps a new mark visible in the breakdown rather than hidden in
- * the after-the-fact footnote.
- */
+/** Whether a stage counts toward perceived latency; unknown stages default to perceived, keeping a new mark visible. */
 export function stageScope(stage: string): StageScope {
   return STAGE_COPY[stage]?.scope ?? StageScope.Perceived;
 }
 
 /**
- * Orders stages the way the pipeline runs them rather than alphabetically (the
- * backend's summary sorts stage keys ordinally). Unknown stages sort after all
- * known ones, alphabetically among themselves, so wire drift lands in a stable
- * spot instead of mid-pipeline.
+ * Pipeline order, not the ordinal order the backend's summary returns. Unknown
+ * stages sort last so wire drift can't land mid-pipeline.
  */
 export function compareStages(a: string, b: string): number {
   const indexA = DISPLAY_ORDER.indexOf(a);

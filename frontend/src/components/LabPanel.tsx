@@ -93,16 +93,13 @@ function conversationMode(conversation: ConversationListing): 'realtime' | 'casc
   return 'mixed';
 }
 
-/** Both modes always get a card, pinned or not, so the pane's shape doesn't shift as baselines are set. */
+/** Both modes always get a card, so the pane's shape doesn't shift as baselines are pinned. */
 const BASELINE_MODES = [
   { mode: 'realtime', label: 'Realtime' },
   { mode: 'cascade', label: 'Cascade' },
 ] as const;
 
-/**
- * One mode's pinned reference numbers, or the prompt to pin one. The card holds
- * its space either way — an unpinned mode is a gap to fill, not a missing card.
- */
+/** One mode's pinned reference numbers, or the prompt to pin one. */
 function BaselineCard({
   mode,
   label,
@@ -138,8 +135,8 @@ function BaselineCard({
                 </li>
               ))}
           </ul>
-          {/* Medians of separate distributions don't add, and cascade's total also
-              carries a client-side playback span no server mark can cover. */}
+          {/* Medians of separate distributions don't add, and the total is
+              client-measured while the stages are server-measured. */}
           <p className="lab-panel__baseline-note">Stage medians don&apos;t sum exactly to the total.</p>
           {afterFirstAudio.length > 0 && (
             <ul className="lab-panel__baseline-stages" data-after="true">

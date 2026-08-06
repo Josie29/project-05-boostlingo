@@ -301,9 +301,8 @@ public sealed class CascadePipeline(
 
                 if (segment.Kind == SttSegmentKind.SpeechEnd)
                 {
-                    // Backdated to the acoustic boundary when the provider reported one:
-                    // the VAD's deliberation before committing is time the listener spends
-                    // waiting, so it belongs inside the window, not before it.
+                    // Backdated to the acoustic boundary where the provider gave one: the
+                    // VAD's deliberation before committing is the listener's wait.
                     await CascadeLatencyMarks.EmitAsync(
                         segment.UtteranceId,
                         CascadeLatencyStages.SpeechEnd,

@@ -202,8 +202,7 @@
 }
 
 @media (min-width: 40rem) {
-  /* Fixed 1fr 1fr, not auto-fit: both cards hold their half whether or not a
-     baseline is pinned, so the pane doesn't reflow as they fill in. */
+  /* Fixed, not auto-fit: both cards hold their half whether pinned or not. */
   .lab-panel__baselines {
     grid-template-columns: 1fr 1fr;
   }
@@ -273,8 +272,8 @@
   white-space: nowrap;
 }
 
-/* Spans past first audio out are not latency (docs/BRIEF.md) — set below a rule,
-   dimmed, so they can't be read as part of the headline number. */
+/* Past first audio out, so not latency — set below a rule so it can't read as
+   part of the headline. */
 .lab-panel__baseline-stages[data-after='true'] {
   border-top: 1px solid var(--color-border);
   padding-top: var(--space-1);

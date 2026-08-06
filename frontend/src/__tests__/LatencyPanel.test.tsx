@@ -52,8 +52,7 @@ describe('LatencyPanel', () => {
 
     expect(screen.getByText('1113ms')).toBeInTheDocument();
     expect(screen.getByText('✓ under 1.5s target')).toBeInTheDocument();
-    // Realtime's audioStart ends AT first audio out, so it is voice generation
-    // inside the perceived window — not the duration of the spoken audio.
+    // audioStart ends AT first audio out — voice generation, not spoken duration.
     expect(screen.getByText('Generating voice').parentElement).toHaveTextContent('400ms');
 
     expect(screen.getByText('3200ms')).toBeInTheDocument();
@@ -86,9 +85,8 @@ describe('LatencyPanel', () => {
     expect(screen.getByText('pending')).toBeInTheDocument();
   });
 
-  // Catches a per-utterance stage breakdown that drops stage rows, leaving only
-  // the total with no insight into which stage was slow. Also catches raw mark
-  // names (sttFinal, mtFinal) leaking back into the UI in place of the labels.
+  // Catches dropped stage rows (the total alone says nothing about which stage was
+  // slow), and raw mark names leaking back into the UI in place of the labels.
   it('renders a stage row per stage in a recent report', () => {
     renderPanel({
       recentReports: [

@@ -217,9 +217,8 @@ public static class CascadeLatencyMarks
     /// <param name="logger">Logs a send failure at Debug; never rethrown.</param>
     /// <param name="cancellationToken">Propagates session cancellation.</param>
     /// <param name="serverTimeMs">Backdates the mark to a moment already observed on this
-    /// same clock, for a stage whose true boundary precedes the event that reveals it -
-    /// see <see cref="SttSegment.AcousticEndAtServerMs"/>. Omit to stamp on emission,
-    /// which is correct for every stage whose boundary <em>is</em> the event.</param>
+    /// same clock, for a stage whose boundary precedes the event revealing it (see
+    /// <see cref="SttSegment.AcousticEndAtServerMs"/>). Omit to stamp on emission.</param>
     public static async Task EmitAsync(
         string utteranceId,
         string stage,
