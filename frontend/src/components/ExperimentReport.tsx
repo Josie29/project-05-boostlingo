@@ -14,6 +14,8 @@ export interface ExperimentReportData {
   transcript: TranscriptEntry[];
   latencyReports: LatencyReport[];
   utteranceCount: number;
+  /** Recoverable stage failures the run survived — absent for stored runs, which don't persist them. */
+  stageFailures?: string[];
 }
 
 /**
@@ -81,6 +83,18 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
     <div className="experiment-report">
       <p className="experiment-report__title">{result.title}</p>
 
+      {(result.stageFailures?.length ?? 0) > 0 && (
+        <div className="experiment-report__failures" role="status">
+          <b>A stage failed during this run.</b> Its timings are missing, so the latency figures below
+          cover only the stages that completed.
+          <ul>
+            {result.stageFailures?.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="experiment-report__tiles">
         {wer !== null && (
           <>
@@ -108,6 +122,10 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
           {/* Nearest-rank p95 below ~5 samples is just the max (at n=1, the median itself) — show the sample size instead of a number that pretends to be a tail. */}
           {p95 !== null && endToEnd.length >= 5 ? (
             <small>p95 {formatMs(p95)}</small>
+          ) : endToEnd.length === 0 && result.utteranceCount > 0 ? (
+            // No utterance reached first audio out, so there is no latency to report -
+            // distinct from "no utterances", which n=0 alone reads as.
+            <small>no audio out</small>
           ) : (
             <small>n={endToEnd.length}</small>
           )}

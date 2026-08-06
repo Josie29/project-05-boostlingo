@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ConversationMetricsPayload } from '../api';
 import { runCascadeExperiment, type ExperimentRunnerDeps } from '../lab/experimentRunner';
-import type { InterpreterSession, SessionState } from '../session/InterpreterSession';
+import type { InterpreterSession, SessionNotice, SessionState } from '../session/InterpreterSession';
 import type { LatencyReport } from '../latency/types';
 import type { TranscriptUpdate } from '../transcript/types';
 
@@ -9,12 +9,14 @@ import type { TranscriptUpdate } from '../transcript/types';
 function fakeSession(options: {
   transcript?: TranscriptUpdate[];
   latency?: LatencyReport[];
+  notices?: SessionNotice[];
   endStatus?: SessionState['status'];
   errorMessage?: string;
 }): InterpreterSession & { stopCalls: number; stageModels: unknown } {
   let state: SessionState = { status: 'idle', errorMessage: null, errorKind: null, reconnectable: false };
   const transcriptListeners = new Set<(update: TranscriptUpdate) => void>();
   const latencyListeners = new Set<(report: LatencyReport) => void>();
+  const noticeListeners = new Set<(notice: SessionNotice) => void>();
 
   const session = {
     mode: 'cascade' as const,
@@ -30,12 +32,17 @@ function fakeSession(options: {
       latencyListeners.add(listener);
       return () => latencyListeners.delete(listener);
     },
+    subscribeToNotice: (listener: (notice: SessionNotice) => void) => {
+      noticeListeners.add(listener);
+      return () => noticeListeners.delete(listener);
+    },
     setStageModels: (models: unknown) => {
       session.stageModels = models;
     },
     start: async () => {
       for (const update of options.transcript ?? []) for (const listener of transcriptListeners) listener(update);
       for (const report of options.latency ?? []) for (const listener of latencyListeners) listener(report);
+      for (const notice of options.notices ?? []) for (const listener of noticeListeners) listener(notice);
       state = {
         status: options.endStatus ?? 'connected',
         errorMessage: options.errorMessage ?? null,
@@ -146,5 +153,22 @@ describe('runCascadeExperiment', () => {
     );
     expect(reported).toHaveLength(0);
     expect(session.stopCalls).toBe(1);
+  });
+});
+
+describe('runCascadeExperiment stage failures', () => {
+  // A replay has nobody watching for the dismissible notice a live session shows,
+  // so a run that lost TTS entirely reported healthy-looking numbers with an
+  // unexplained gap. Catches stage failures being dropped again.
+  it('collects recoverable stage failures, deduplicated', async () => {
+    const session = fakeSession({
+      notices: [
+        { id: 'n1', message: 'Text-to-speech failed for one utterance.' },
+        { id: 'n2', message: 'Text-to-speech failed for one utterance.' },
+      ],
+    });
+    const result = await runCascadeExperiment(CONFIG, undefined, fakeDeps(session, []));
+
+    expect(result.stageFailures).toEqual(['Text-to-speech failed for one utterance.']);
   });
 });

@@ -26,6 +26,7 @@ function reportFromResult(result: ExperimentResult): ExperimentReportData {
     transcript: result.transcript,
     latencyReports: result.latencyReports,
     utteranceCount: result.utteranceCount,
+    stageFailures: result.stageFailures,
   };
 }
 

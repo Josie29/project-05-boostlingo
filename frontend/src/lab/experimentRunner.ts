@@ -33,6 +33,13 @@ export interface ExperimentResult {
   transcript: TranscriptEntry[];
   /** Every utterance's latency breakdown, in appearance order. */
   latencyReports: LatencyReport[];
+  /**
+   * Recoverable stage failures the session survived (a failed MT/TTS request, a
+   * reopened STT stream). A live session shows these as dismissible notices; a
+   * replay has nobody watching, and without them a run that lost a whole stage
+   * reads as a healthy run with missing numbers.
+   */
+  stageFailures: string[];
 }
 
 export type ExperimentPhase = 'decoding' | 'running' | 'draining' | 'scoring';
@@ -104,6 +111,7 @@ export async function runCascadeExperiment(
   const session = deps.createSession(fixture.stream);
   let transcript: TranscriptState = INITIAL_TRANSCRIPT_STATE;
   let latency: LatencyState = INITIAL_LATENCY_STATE;
+  const stageFailures: string[] = [];
   const emitUpdate = () =>
     observers?.onUpdate?.({ transcript: transcript.entries, latencyReports: latency.reports });
   const unsubscribes = [
@@ -114,6 +122,9 @@ export async function runCascadeExperiment(
     session.subscribeToLatency?.((report) => {
       latency = latencyReducer(latency, report);
       emitUpdate();
+    }),
+    session.subscribeToNotice?.((notice) => {
+      if (!stageFailures.includes(notice.message)) stageFailures.push(notice.message);
     }),
   ];
 
@@ -186,5 +197,6 @@ export async function runCascadeExperiment(
     utteranceCount: latency.reports.length,
     transcript: transcript.entries,
     latencyReports: latency.reports,
+    stageFailures,
   };
 }
