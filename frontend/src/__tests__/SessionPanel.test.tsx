@@ -181,9 +181,10 @@ describe('SessionPanel', () => {
     });
 
     expect(screen.getByText('800ms')).toBeInTheDocument();
-    expect(screen.getByText('sttFinal: 150ms')).toBeInTheDocument();
     expect(screen.getByText('900ms')).toBeInTheDocument();
-    expect(screen.getByText('sttFinal: 210ms')).toBeInTheDocument();
+    const [average, report] = screen.getAllByText('Finalizing transcript');
+    expect(average.parentElement).toHaveTextContent('150ms');
+    expect(report.parentElement).toHaveTextContent('210ms');
   });
 
   // Catches the target wiring bug: Realtime and Cascade have different targets

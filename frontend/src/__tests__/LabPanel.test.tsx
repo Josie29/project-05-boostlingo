@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LabPanel } from '../components/LabPanel';
 
@@ -36,27 +36,6 @@ const BASELINE_SUMMARY = {
   ],
 };
 
-const CURRENT_SUMMARY = {
-  groups: [
-    {
-      mode: 'cascade',
-      translationProvider: null,
-      conversationCount: 2,
-      utteranceCount: 5,
-      endToEnd: { count: 5, medianMs: 1980, p95Ms: 2500 },
-      stages: [{ stage: 'ttsFirstByte', stats: { count: 5, medianMs: 610, p95Ms: 900 } }],
-    },
-    {
-      mode: 'realtime',
-      translationProvider: null,
-      conversationCount: 1,
-      utteranceCount: 2,
-      endToEnd: { count: 2, medianMs: 500, p95Ms: 600 },
-      stages: [],
-    },
-  ],
-};
-
 const DETAIL = {
   conversationId: 'conv-1',
   sourceLang: 'en',
@@ -84,13 +63,11 @@ beforeEach(() => {
     const path = url.toString();
     const body = path.includes('scope=baseline')
       ? BASELINE_SUMMARY
-      : path.includes('scope=current')
-        ? CURRENT_SUMMARY
-        : path.includes('/api/metrics/conversations/')
-          ? DETAIL
-          : path.includes('/baseline')
-            ? {}
-            : { conversations: CONVERSATIONS };
+      : path.includes('/api/metrics/conversations/')
+        ? DETAIL
+        : path.includes('/baseline')
+          ? {}
+          : { conversations: CONVERSATIONS };
     return Promise.resolve({ ok: true, status: 200, json: async () => body });
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -98,26 +75,27 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('LabPanel', () => {
-  // Catches the progress pane showing raw numbers with no comparison: a current
-  // mode must render its median with the delta against the pinned baseline,
-  // improvements pointing down.
-  it('renders per-mode deltas of current medians against the baseline', async () => {
+  // Catches the baseline card showing numbers from the wrong scope (the pane
+  // must report what's pinned, not a pooled all-sessions median) or dropping the
+  // stage breakdown under the headline.
+  it('renders the pinned baseline median and stage breakdown for a pinned mode', async () => {
     render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
 
     expect(await screen.findByText('Cascade')).toBeInTheDocument();
-    expect(screen.getByText('1980ms')).toBeInTheDocument();
-    expect(screen.getByText('▼ 477ms')).toBeInTheDocument();
-    expect(screen.getByText(/ttsFirstByte: 610ms/)).toBeInTheDocument();
-    expect(screen.getByText('▼ 388ms')).toBeInTheDocument();
+    // Scoped to the pane: the conversations table below repeats the same median.
+    const pane = within(screen.getByRole('region', { name: 'Baseline' }));
+    expect(pane.getByText('2457ms')).toBeInTheDocument();
+    expect(pane.getByText('Generating voice').parentElement).toHaveTextContent('998ms');
   });
 
-  // Catches noise cards with nothing to compare: a mode with current sessions but
-  // no pinned counterpart (realtime here) must not render a card at all.
-  it('hides modes that have no baseline counterpart', async () => {
+  // Catches the pane collapsing to one card when only one mode is pinned: both
+  // modes must always hold their space, the unpinned one telling you how to fill it.
+  it('keeps a card for an unpinned mode with a prompt to pin one', async () => {
     render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
     await screen.findByText('Cascade');
 
-    expect(screen.queryByText('Realtime')).not.toBeInTheDocument();
+    expect(screen.getByText('Realtime')).toBeInTheDocument();
+    expect(screen.getByText('Nothing pinned. Pin a realtime run below to populate this.')).toBeInTheDocument();
   });
 
   // Catches a row's pin toggle not actually changing the set: unpinning the only

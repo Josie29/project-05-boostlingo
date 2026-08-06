@@ -1,3 +1,4 @@
+import { compareStages, stageLabel, stageSpan } from '../latency/stageLabels';
 import type { LatencySessionAverages, LatencyReport } from '../latency/types';
 import { modeOfPrefixedId, type SessionMode } from '../session/InterpreterSession';
 
@@ -105,11 +106,14 @@ function ModeColumn({ column }: { column: LatencyModeColumn }) {
             </div>
           )}
           <ul className="latency-panel__stage-list">
-            {averages.stageAverages.map(({ stage, ms }) => (
-              <li key={stage}>
-                {stage}: {formatMs(ms)}
-              </li>
-            ))}
+            {[...averages.stageAverages]
+              .sort((a, b) => compareStages(a.stage, b.stage))
+              .map(({ stage, ms }) => (
+                <li key={stage} title={stageSpan(stage)}>
+                  <span>{stageLabel(stage)}</span>
+                  <span>{formatMs(ms)}</span>
+                </li>
+              ))}
           </ul>
         </>
       )}
@@ -138,8 +142,9 @@ function ReportRow({ report, targetMs }: { report: LatencyReport; targetMs: numb
       {report.stages.length > 0 && (
         <ul className="latency-panel__report-stages">
           {report.stages.map(({ stage, ms }) => (
-            <li key={stage}>
-              {stage}: {formatMs(ms)}
+            <li key={stage} title={stageSpan(stage)}>
+              <span>{stageLabel(stage)}</span>
+              <span>{formatMs(ms)}</span>
             </li>
           ))}
         </ul>

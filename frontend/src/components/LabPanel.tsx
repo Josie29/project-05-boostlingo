@@ -11,6 +11,7 @@ import {
   type SummaryGroup,
 } from '../api';
 import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
+import { compareStages, stageLabel, stageSpan } from '../latency/stageLabels';
 import { computeWer, groundTruthLines } from '../lab/wer';
 import type { TranscriptEntry } from '../transcript/types';
 import { ExperimentReport, type ExperimentReportData } from './ExperimentReport';
@@ -92,28 +93,66 @@ function conversationMode(conversation: ConversationListing): 'realtime' | 'casc
   return 'mixed';
 }
 
-/** A signed duration delta where lower is better: green ▼ improvement, red ▲ regression. */
-function Delta({ deltaMs }: { deltaMs: number }) {
-  const rounded = Math.round(deltaMs);
-  if (rounded === 0) return <span className="lab-panel__delta-flat">±0ms</span>;
-  return rounded < 0 ? (
-    <span className="lab-panel__delta-down">▼ {-rounded}ms</span>
-  ) : (
-    <span className="lab-panel__delta-up">▲ {rounded}ms</span>
+/** Both modes always get a card, pinned or not, so the pane's shape doesn't shift as baselines are set. */
+const BASELINE_MODES = [
+  { mode: 'realtime', label: 'Realtime' },
+  { mode: 'cascade', label: 'Cascade' },
+] as const;
+
+/**
+ * One mode's pinned reference numbers, or the prompt to pin one. The card holds
+ * its space either way — an unpinned mode is a gap to fill, not a missing card.
+ */
+function BaselineCard({
+  mode,
+  label,
+  group,
+}: {
+  mode: (typeof BASELINE_MODES)[number]['mode'];
+  label: string;
+  group: SummaryGroup | null;
+}) {
+  return (
+    <div className="lab-panel__baseline-card" data-mode={mode}>
+      <p className="lab-panel__baseline-name">{label}</p>
+      {group === null ? (
+        <p className="lab-panel__empty">Nothing pinned. Pin a {label.toLowerCase()} run below to populate this.</p>
+      ) : (
+        <>
+          <p className="lab-panel__baseline-total">
+            {group.endToEnd ? formatMs(group.endToEnd.medianMs) : '—'}
+            <span className="lab-panel__baseline-caption">
+              median end-to-end · {group.utteranceCount} utterances
+            </span>
+          </p>
+          <ul className="lab-panel__baseline-stages">
+            {[...group.stages]
+              .sort((a, b) => compareStages(a.stage, b.stage))
+              .map(({ stage, stats }) => (
+                <li key={stage} title={stageSpan(stage)}>
+                  <span>{stageLabel(stage)}</span>
+                  <span className="lab-panel__baseline-stage-value">{formatMs(stats.medianMs)}</span>
+                </li>
+              ))}
+          </ul>
+          {/* Stage medians come from separate distributions and the total also
+              carries client-side playback scheduling, so they don't add up. */}
+          <p className="lab-panel__baseline-note">Stage medians don&apos;t sum to the total.</p>
+        </>
+      )}
+    </div>
   );
 }
 
 /**
- * The Lab view (P1+P2): a progress pane diffing current sessions against the
- * pinned baseline set, and the experiments table — one row per stored
- * conversation with its stage config and per-mode medians. Read-only apart
- * from the pin action, and socket-free, so viewing it never disturbs a live
- * session.
+ * The Lab view (P1+P2): a baseline pane showing the pinned reference numbers per
+ * mode, and the experiments table — one row per stored conversation with its
+ * stage config and per-mode medians. Read-only apart from the pin action, and
+ * socket-free, so viewing it never disturbs a live session.
  */
 export function LabPanel({ pair, stageModels }: LabPanelProps) {
   const [conversations, setConversations] = useState<ConversationListing[] | null>(null);
   const [baselineGroups, setBaselineGroups] = useState<SummaryGroup[] | null>(null);
-  const [currentGroups, setCurrentGroups] = useState<SummaryGroup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -138,13 +177,12 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
   }, [runPhase]);
 
   const refresh = useCallback(() => {
-    // group='mode': the progress pane compares paradigms; the MT provider is one of
-    // the variables under test, not a separate comparison column.
-    Promise.all([getConversations(), getSummary('baseline', 'mode'), getSummary('current', 'mode')])
-      .then(([listings, baseline, current]) => {
+    // group='mode': the baseline pane is per-paradigm; the MT provider is one of
+    // the variables under test, not a separate column.
+    Promise.all([getConversations(), getSummary('baseline', 'mode')])
+      .then(([listings, baseline]) => {
         setConversations(listings);
         setBaselineGroups(baseline.groups);
-        setCurrentGroups(current.groups);
         setError(null);
       })
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Failed to load the Lab.'));
@@ -216,57 +254,25 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
 
   return (
     <div className="lab-panel__sections">
-      <section className="lab-panel" aria-label="Progress">
+      <section className="lab-panel" aria-label="Baseline">
         <div className="lab-panel__header">
-          <h3>Progress vs baseline</h3>
+          <h3>Baseline</h3>
           {hasBaseline && (
             <button type="button" className="lab-panel__refresh" onClick={clearBaseline}>
               Clear baseline
             </button>
           )}
         </div>
-        {!hasBaseline && (
-          <p className="lab-panel__empty">
-            No baseline pinned. Pin one representative session per mode below (e.g. one realtime, one cascade);
-            later sessions are then compared against them here.
-          </p>
-        )}
-        {hasBaseline && currentGroups !== null && (
-          <div className="lab-panel__progress">
-            {/* Only modes present in BOTH sets render — a card is a comparison, and a
-                mode with no pinned counterpart has nothing to be compared against. */}
-            {currentGroups
-              .filter((group) => baselineGroups.some((candidate) => candidate.mode === group.mode))
-              .map((group) => {
-                const baselineGroup = baselineGroups.find((candidate) => candidate.mode === group.mode)!;
-                return (
-                  <div key={group.mode} className="lab-panel__progress-card" data-mode={group.mode}>
-                    <p className="lab-panel__progress-name">{group.mode === 'realtime' ? 'Realtime' : 'Cascade'}</p>
-                    <p className="lab-panel__progress-total">
-                      {group.endToEnd ? formatMs(group.endToEnd.medianMs) : '—'}
-                      {group.endToEnd && baselineGroup.endToEnd && (
-                        <Delta deltaMs={group.endToEnd.medianMs - baselineGroup.endToEnd.medianMs} />
-                      )}
-                    </p>
-                    <ul className="lab-panel__progress-stages">
-                      {group.stages.map(({ stage, stats }) => {
-                        const baselineStats = baselineGroup.stages.find((candidate) => candidate.stage === stage)?.stats;
-                        return (
-                          <li key={stage}>
-                            {stage}: {formatMs(stats.medianMs)}{' '}
-                            {baselineStats && <Delta deltaMs={stats.medianMs - baselineStats.medianMs} />}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                );
-              })}
-            {currentGroups.length === 0 && (
-              <p className="lab-panel__empty">Baseline pinned. New sessions will show their deltas here.</p>
-            )}
-          </div>
-        )}
+        <div className="lab-panel__baselines">
+          {BASELINE_MODES.map(({ mode, label }) => (
+            <BaselineCard
+              key={mode}
+              mode={mode}
+              label={label}
+              group={baselineGroups?.find((candidate) => candidate.mode === mode) ?? null}
+            />
+          ))}
+        </div>
       </section>
 
       <section className="lab-panel" aria-label="Run an experiment">

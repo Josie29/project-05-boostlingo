@@ -52,11 +52,11 @@ describe('LatencyPanel', () => {
 
     expect(screen.getByText('1113ms')).toBeInTheDocument();
     expect(screen.getByText('✓ under 1.5s target')).toBeInTheDocument();
-    expect(screen.getByText('audioStart: 400ms')).toBeInTheDocument();
+    expect(screen.getByText('Speaking').parentElement).toHaveTextContent('400ms');
 
     expect(screen.getByText('3200ms')).toBeInTheDocument();
     expect(screen.getByText('▲ 200ms over 3.0s target')).toBeInTheDocument();
-    expect(screen.getByText('sttFinal: 276ms')).toBeInTheDocument();
+    expect(screen.getByText('Finalizing transcript').parentElement).toHaveTextContent('276ms');
   });
 
   // Catches a recent utterance judged against the wrong mode's target after a
@@ -85,7 +85,8 @@ describe('LatencyPanel', () => {
   });
 
   // Catches a per-utterance stage breakdown that drops stage rows, leaving only
-  // the total with no insight into which stage was slow.
+  // the total with no insight into which stage was slow. Also catches raw mark
+  // names (sttFinal, mtFinal) leaking back into the UI in place of the labels.
   it('renders a stage row per stage in a recent report', () => {
     renderPanel({
       recentReports: [
@@ -101,7 +102,8 @@ describe('LatencyPanel', () => {
     });
 
     expect(screen.getByText('980ms')).toBeInTheDocument();
-    expect(screen.getByText('sttFinal: 320ms')).toBeInTheDocument();
-    expect(screen.getByText('mtFinal: 140ms')).toBeInTheDocument();
+    expect(screen.getByText('Finalizing transcript').parentElement).toHaveTextContent('320ms');
+    expect(screen.getByText('Finishing translation').parentElement).toHaveTextContent('140ms');
+    expect(screen.queryByText(/sttFinal/)).not.toBeInTheDocument();
   });
 });

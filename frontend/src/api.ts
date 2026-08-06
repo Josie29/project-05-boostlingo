@@ -241,7 +241,7 @@ export interface SummaryGroup {
   stages: { stage: string; stats: LatencyStatsInfo }[];
 }
 
-/** Which conversations a summary draws from — the progress pane diffs baseline vs current. */
+/** Which conversations a summary draws from — the Lab's baseline pane reads `'baseline'` (the pinned set). */
 export type SummaryScope = 'all' | 'baseline' | 'current';
 
 /**
