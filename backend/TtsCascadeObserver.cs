@@ -329,7 +329,10 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
     /// <see cref="CascadeLatencyStages.TtsFirstByte"/> latency mark (#10) - keyed by
     /// <see cref="TranslationChunk.SourceUtteranceId"/>, matching every other stage's
     /// mark for this utterance - the moment the first audio chunk arrives from the
-    /// provider, if this utterance hasn't already had one. A synthesis failure is
+    /// provider, if this utterance hasn't already had one. On that same first phrase it
+    /// also emits <see cref="CascadeLatencyStages.TtsRequestSent"/> just before handing
+    /// the request over, so the two marks bracket the provider call itself and this
+    /// class's own dispatch time stops being billed to the provider. A synthesis failure is
     /// reported as an <c>error</c> event and otherwise swallowed - scoped to this one
     /// phrase, never taking down the pump or the rest of the utterance's remaining
     /// phrases. A barge-in (#11) cancelling this exact phrase mid-synthesis is handled
@@ -365,6 +368,12 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
             return (startAlreadySent, firstByteAlreadyMarked);
         }
 
+        // Captured before the flag flips below: "is this the first phrase we are
+        // synthesizing for this utterance?" is exactly the condition ttsFirstByte is
+        // marked under too, so keying the request mark off it keeps the two bracketing
+        // the same request without threading a third flag through this method.
+        var isFirstPhraseOfUtterance = !startAlreadySent;
+
         if (!startAlreadySent)
         {
             await events.SendEventAsync(
@@ -391,6 +400,16 @@ public sealed class TtsCascadeObserver : ITranslationObserver, ICascadeBargeInOb
         try
         {
             var request = new TtsRequest(chunk.TargetUtteranceId, phraseText, chunk.TargetLang);
+
+            // Emitted here, immediately before the provider call and after everything
+            // this class does on its own account - the last instant that is still our
+            // time rather than the provider's.
+            if (isFirstPhraseOfUtterance)
+            {
+                await CascadeLatencyMarks.EmitAsync(
+                    chunk.SourceUtteranceId, CascadeLatencyStages.TtsRequestSent, events, _logger, cancellationToken);
+            }
+
             await foreach (var audioChunk in _ttsProvider.SynthesizeAsync(request, phraseCts.Token))
             {
                 if (!firstByteAlreadyMarked)

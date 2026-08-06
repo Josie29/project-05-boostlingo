@@ -534,9 +534,9 @@ public class CascadePipelineTests
     }
 
     /// <summary>
-    /// Confirms one spoken utterance produces all seven latency marks (#10), in the
+    /// Confirms one spoken utterance produces all eight latency marks (#10), in the
     /// order the cascade actually reaches those boundaries - speechEnd, then the STT
-    /// pair, then the MT pair, then the TTS pair - each keyed by the same source
+    /// pair, then the MT pair, then the TTS trio - each keyed by the same source
     /// utteranceId, and that their serverTimeMs values never decrease across the run.
     /// This is the exact sequence the frontend's latency panel groups by utteranceId
     /// and renders as a per-stage breakdown; losing the order or the shared key would
@@ -564,6 +564,7 @@ public class CascadePipelineTests
             CascadeLatencyStages.SttFinal,
             CascadeLatencyStages.MtFirstToken,
             CascadeLatencyStages.MtFinal,
+            CascadeLatencyStages.TtsRequestSent,
             CascadeLatencyStages.TtsFirstByte,
             CascadeLatencyStages.TtsEnd,
         ];

@@ -24,7 +24,7 @@ audio drift, or unbounded memory growth.
 3. Press Stop at the end of each session — that is what persists the run.
    Then pull the figures: `curl -s localhost:5170/api/metrics/summary` gives
    median/p95 end-to-end and per-stage (speechEnd → sttFinal → mtFirstToken →
-   ttsFirstByte → ttsEnd) per (mode, MT provider);
+   ttsRequestSent → ttsFirstByte → ttsEnd) per (mode, MT provider);
    `/api/metrics/conversations` lists the captured sessions for sanity checks.
 4. Stability: watch for WebSocket/WebRTC disconnects (none expected), audible
    drift or playback backlog growth in cascade, and memory growth — browser
@@ -84,7 +84,8 @@ The breakdown splits into `responseCreated` and `audioStart`.
 | End-to-end, p95 | — | _pending_ |
 | speechEnd → sttFinal, median | — | _pending_ |
 | sttFinal → mtFirstToken, median | — | _pending_ |
-| mtFirstToken → ttsFirstByte, median | — | _pending_ |
+| mtFirstToken → ttsRequestSent, median | — | _pending_ |
+| ttsRequestSent → ttsFirstByte, median | — | _pending_ |
 | Barge-in: playback flushed promptly, no stale tail | yes | _pending_ |
 | 5-min session: disconnects / drift / backlog | none | _pending_ |
 | 5-min session: memory growth (tab / backend) | bounded | _pending_ |

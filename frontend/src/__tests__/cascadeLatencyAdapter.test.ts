@@ -61,6 +61,23 @@ describe('CascadeLatencyTracker', () => {
     expect(report?.stages.every((stage) => stage.ms >= 0)).toBe(true);
   });
 
+  // The whole point of the ttsRequestSent mark: what used to be one "Synthesizing
+  // voice" bar is two, and "Synthesizing voice" now measures only the provider's
+  // time to first byte rather than that plus our own dispatch. Catches
+  // ttsRequestSent being ordered anywhere but between mtFinal and ttsFirstByte,
+  // which would silently re-merge the two halves into one misattributed number.
+  it('splits the TTS span into our dispatch and the provider time to first byte', () => {
+    const tracker = new CascadeLatencyTracker();
+    tracker.handleEnvelope(mark('utt_1', 'mtFinal', 1_000));
+    tracker.handleEnvelope(mark('utt_1', 'ttsRequestSent', 1_200));
+    const report = tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 2_100));
+
+    expect(report?.stages).toEqual([
+      { stage: 'ttsRequestSent', ms: 200 },
+      { stage: 'ttsFirstByte', ms: 900 },
+    ]);
+  });
+
   // Catches a crash/corruption bug: the very first mark an utterance ever
   // receives (whichever stage it happens to be) has nothing earlier to diff
   // against and must be omitted from `stages` entirely — never a `NaN` or a

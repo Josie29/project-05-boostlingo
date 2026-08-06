@@ -14,6 +14,7 @@ export const CASCADE_STAGE_ORDER = [
   'sttFinal',
   'mtFirstToken',
   'mtFinal',
+  'ttsRequestSent',
   'ttsFirstByte',
   'ttsEnd',
 ] as const;

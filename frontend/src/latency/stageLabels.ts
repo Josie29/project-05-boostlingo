@@ -60,6 +60,11 @@ const STAGE_COPY: Record<string, StageCopy> = {
     span: 'ends when translation completes — voice synthesis may already be running',
     scope: StageScope.Perceived,
   },
+  ttsRequestSent: {
+    label: 'Queuing voice request',
+    span: 'ends when the request leaves for the voice provider — our own dispatch, not the provider’s time',
+    scope: StageScope.Perceived,
+  },
   ttsFirstByte: {
     label: 'Synthesizing voice',
     span: 'ends at the first synthesized audio byte — the perceived-latency finish line',

@@ -176,6 +176,17 @@ public static class CascadeLatencyStages
     /// <summary>The settled MT translation for this utterance arrived.</summary>
     public const string MtFinal = "mtFinal";
 
+    /// <summary>
+    /// This utterance's first synthesis request was handed to the TTS (text-to-speech)
+    /// provider. Splits what used to be one <c>mtFinal - ttsFirstByte</c> span into the
+    /// two very differently-fixable halves it was hiding: everything upstream of this
+    /// mark is our own dispatch (the observer's queue handoff, waiting behind an earlier
+    /// phrase's synthesis, the chunker's flush), and everything after it is the
+    /// provider's time to first byte. Only emitted for the first phrase of an utterance,
+    /// matching <see cref="TtsFirstByte"/>, so the pair always brackets the same request.
+    /// </summary>
+    public const string TtsRequestSent = "ttsRequestSent";
+
     /// <summary>The first synthesized TTS (text-to-speech) audio byte for this utterance arrived from the provider.</summary>
     public const string TtsFirstByte = "ttsFirstByte";
 

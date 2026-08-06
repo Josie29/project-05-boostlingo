@@ -280,6 +280,42 @@ public class TtsCascadeObserverTests
         Assert.False(sink.Binary.Reader.TryRead(out _));
     }
 
+    /// <summary>
+    /// Confirms an utterance synthesized as several phrases still emits exactly one
+    /// ttsRequestSent mark, on the first phrase, ahead of ttsFirstByte. The pair exists
+    /// to split "our dispatch" from "the provider's time to first byte"; a second mark
+    /// from a later phrase would land after ttsFirstByte and make the latency panel
+    /// report a negative or wildly wrong provider span for that utterance.
+    /// </summary>
+    [Fact]
+    public async Task MultiPhraseUtterance_EmitsOneTtsRequestSentMark_BeforeFirstByte()
+    {
+        var ttsProvider = new FakeTtsProvider(request => Chunks(request.UtteranceId, [1]));
+        var observer = new TtsCascadeObserver(ttsProvider, NullLogger<TtsCascadeObserver>.Instance);
+        var sink = new FakeEventSink();
+
+        // Two complete sentences in one delta, so this one utterance dispatches two
+        // separate synthesis requests (see SentenceChunker); the trailing space is what
+        // confirms the second boundary within this delta.
+        await observer.OnTranslationChunkAsync(
+            new TranslationChunk("utt-1", "utt-1-target", "Hola. Adios. ", IsFinal: false, "es"), sink, CancellationToken.None);
+        await observer.OnTranslationChunkAsync(
+            new TranslationChunk("utt-1", "utt-1-target", "Hola. Adios.", IsFinal: true, "es"), sink, CancellationToken.None);
+
+        await observer.DisposeAsync();
+
+        var stages = new List<string>();
+        while (sink.Marks.Reader.TryRead(out var mark))
+        {
+            stages.Add(mark.Stage);
+        }
+
+        Assert.Equal(2, ttsProvider.Requests.Count);
+        Assert.Equal(
+            [CascadeLatencyStages.TtsRequestSent, CascadeLatencyStages.TtsFirstByte, CascadeLatencyStages.TtsEnd],
+            stages);
+    }
+
     private static async IAsyncEnumerable<TtsAudioChunk> Chunks(string utteranceId, params byte[][] frames)
     {
         foreach (var frame in frames)
