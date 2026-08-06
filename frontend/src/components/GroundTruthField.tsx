@@ -24,10 +24,10 @@ export interface GroundTruthFieldProps {
 }
 
 /**
- * The experiment's ground-truth input: the format rules, the box, and a preview
- * of exactly what will be scored. The preview is the point — a paste that
- * silently loses lines or keeps doc chrome inflates WER into what reads as a
- * model failure, so the user sees the parse before spending a run on it.
+ * The experiment's ground-truth input: the format rules, the box, and the counts
+ * WER will divide by. A paste that silently loses lines or stops short of the
+ * audio inflates WER into what reads as a model failure, so the counts are shown
+ * before a run is spent on it.
  */
 export function GroundTruthField({ value, onChange }: GroundTruthFieldProps) {
   const utterances = groundTruthLines(value);
@@ -95,17 +95,6 @@ export function GroundTruthField({ value, onChange }: GroundTruthFieldProps) {
               Only {words.length} reference words. Below ~{SHORT_REFERENCE_WORDS} a single error moves WER a lot —
               read the diff, not just the number.
             </p>
-          )}
-
-          {utterances.length > 0 && (
-            <details className="ground-truth__details">
-              <summary>Exactly what will be scored</summary>
-              <ol className="ground-truth__lines">
-                {utterances.map((utterance, index) => (
-                  <li key={index}>{utterance}</li>
-                ))}
-              </ol>
-            </details>
           )}
         </div>
       )}

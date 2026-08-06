@@ -22,10 +22,9 @@ Read in order, pause ~2 seconds between each, press Stop at the end.
 
 The Lab's ground-truth box takes plain lines only — one utterance per line, in
 spoken order, blank lines and `#` comments ignored. Table rows are dropped, so
-copy this block, not the table above. The box previews exactly what it parsed
-before you run — check the utterance count and word count there, because a
-reference missing part of what was said scores the rest as insertions, and WER
-climbs past 100% looking like a model failure.
+copy this block, not the table above. Check the utterance and word counts the
+box reports before you run — a reference missing part of what was said scores
+the rest as insertions, and WER climbs past 100% looking like a model failure.
 
 ```
 Are you allergic to any medications?

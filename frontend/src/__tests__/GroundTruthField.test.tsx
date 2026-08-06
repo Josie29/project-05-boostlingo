@@ -13,8 +13,6 @@ describe('GroundTruthField', () => {
     renderField('# notes\nTake one tablet daily.\n\nStop if swelling occurs.');
 
     expect(screen.getByText('2 utterances · 8 reference words')).toBeInTheDocument();
-    expect(screen.getByText('Take one tablet daily.')).toBeInTheDocument();
-    expect(screen.getByText('Stop if swelling occurs.')).toBeInTheDocument();
   });
 
   // A fixed box hid the tail of a long set, which is exactly the content someone
