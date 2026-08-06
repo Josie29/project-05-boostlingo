@@ -48,10 +48,6 @@ export function GroundTruthField({ value, onChange }: GroundTruthFieldProps) {
           Every word spoken in the file, or the rest scores as errors. Long utterances stay on one line —
           separate them with a blank line so a wrapped line still reads as one utterance.
         </li>
-        <li>
-          Blank lines and <code>#</code> comments are ignored. Plain lines only — markdown table rows are dropped,
-          so paste the utterance column, not the table.
-        </li>
         <li>Write it naturally: case and punctuation are normalized away before scoring.</li>
         <li>
           Write numbers as they are spoken — <em>three days</em>, not <em>3 days</em>.
