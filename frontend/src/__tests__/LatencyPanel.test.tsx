@@ -53,7 +53,7 @@ describe('LatencyPanel', () => {
     expect(screen.getByText('1113ms')).toBeInTheDocument();
     expect(screen.getByText('✓ under 1.5s target')).toBeInTheDocument();
     // audioStart ends AT first audio out — voice generation, not spoken duration.
-    expect(screen.getByText('Generating voice').parentElement).toHaveTextContent('400ms');
+    expect(screen.getByText('Synthesizing voice').parentElement).toHaveTextContent('400ms');
 
     expect(screen.getByText('3200ms')).toBeInTheDocument();
     expect(screen.getByText('▲ 200ms over 3.0s target')).toBeInTheDocument();

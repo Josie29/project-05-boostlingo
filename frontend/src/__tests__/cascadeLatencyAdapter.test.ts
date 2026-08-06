@@ -44,7 +44,7 @@ describe('CascadeLatencyTracker', () => {
 
   // TTS synthesizes each sentence while translation still streams, so ttsFirstByte
   // can precede mtFinal — which canonical-order diffing renders as a negative
-  // "Generating voice". Catches a return to canonical-order diffing.
+  // "Synthesizing voice". Catches a return to canonical-order diffing.
   it('reports non-negative intervals when marks arrive out of canonical stage order', () => {
     const tracker = new CascadeLatencyTracker();
     tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_000));

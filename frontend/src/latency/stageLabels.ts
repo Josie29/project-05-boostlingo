@@ -61,7 +61,7 @@ const STAGE_COPY: Record<string, StageCopy> = {
     scope: StageScope.Perceived,
   },
   ttsFirstByte: {
-    label: 'Generating voice',
+    label: 'Synthesizing voice',
     span: 'ends at the first synthesized audio byte — the perceived-latency finish line',
     scope: StageScope.Perceived,
   },
@@ -78,7 +78,7 @@ const STAGE_COPY: Record<string, StageCopy> = {
     scope: StageScope.Perceived,
   },
   audioStart: {
-    label: 'Generating voice',
+    label: 'Synthesizing voice',
     span: 'ends when the first audio arrives — the perceived-latency finish line',
     scope: StageScope.Perceived,
   },

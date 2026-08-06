@@ -4,15 +4,18 @@ import { BENCHMARK_TARGET_MS } from '../latency/targets';
 import type { SessionMode } from '../session/InterpreterSession';
 
 /**
- * Which reading of a stage's number the breakdown is showing. The distinction
- * is invisible in a bare column of durations — 963ms could be "this step took
- * 963ms" or "we were 963ms in when it finished" — so it is carried three ways
- * at once: bar geometry, value format, and the column header.
+ * Which reading of a stage's number the value column is showing. 963ms could be
+ * "this step took 963ms" or "we were 963ms in when it finished", and the digits
+ * alone can't say which, so the column header names the frame too.
+ *
+ * The bars don't change: a waterfall already carries both readings at once —
+ * where a bar starts is the running total, how long it is is that step's own
+ * duration. The switch picks which of the two the numbers spell out.
  */
 export const LatencyFrame = {
-  /** Each step's own duration. Bars share a left edge, so lengths compare directly. */
+  /** That step's own duration, written `+963ms`. */
   Step: 'step',
-  /** Elapsed since speech ended. Bars offset into a waterfall against the axis. */
+  /** Elapsed since speech ended when it finished, written `1.83s`. */
   Total: 'total',
 } as const;
 
@@ -44,13 +47,9 @@ function formatSeconds(ms: number): string {
 
 /**
  * Lays the group's stage medians out along one timeline: perceived-latency
- * stages in pipeline order, then the remainder between their sum and the
- * measured total, then anything past first audio out.
- *
- * The remainder row exists because the total is measured on the client's clock
- * while the stages are stamped on the server's — the difference is wire time no
- * mark can cover. Naming it is what lets the stack reconcile instead of looking
- * broken.
+ * stages in pipeline order, then anything past first audio out. The rows stop
+ * short of the headline because the total is client-measured while the stages
+ * are server-stamped — see the card's own footnote.
  */
 function buildRows(group: SummaryGroup): WaterfallRow[] {
   const sorted = [...group.stages].sort((a, b) => compareStages(a.stage, b.stage));
@@ -68,21 +67,6 @@ function buildRows(group: SummaryGroup): WaterfallRow[] {
       after: false,
     });
     elapsed += stats.medianMs;
-  }
-
-  const remainderMs = (group.endToEnd?.medianMs ?? 0) - elapsed;
-  // Sub-millisecond remainders are median rounding, not a leg worth a row.
-  if (group.endToEnd !== null && remainderMs >= 1) {
-    rows.push({
-      key: 'network',
-      label: 'Network + playback',
-      title: 'wire time no server mark can cover, plus the browser scheduling the audio',
-      family: 'other',
-      ms: remainderMs,
-      startMs: elapsed,
-      after: false,
-    });
-    elapsed += remainderMs;
   }
 
   for (const { stage, stats } of sorted.filter(({ stage }) => stageScope(stage) === StageScope.AfterFirstAudio)) {
@@ -171,10 +155,7 @@ export function BaselineCard({ mode, label, group, frame }: BaselineCardProps) {
                     className="baseline-card__bar"
                     data-family={row.family}
                     data-ghost={row.after || undefined}
-                    style={{
-                      left: `${frame === LatencyFrame.Step ? 0 : pct(row.startMs)}%`,
-                      width: `${pct(row.ms)}%`,
-                    }}
+                    style={{ left: `${pct(row.startMs)}%`, width: `${pct(row.ms)}%` }}
                   />
                 </span>
               </td>
@@ -207,6 +188,7 @@ export function BaselineCard({ mode, label, group, frame }: BaselineCardProps) {
           </tr>
         </tfoot>
       </table>
+      <p className="baseline-card__note">Steps are server-timed; the total is measured at the listener.</p>
     </div>
   );
 }
