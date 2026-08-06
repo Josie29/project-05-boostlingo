@@ -507,6 +507,33 @@ public class CascadePipelineTests
     }
 
     /// <summary>
+    /// Confirms the speechEnd mark is stamped at the acoustic boundary the provider
+    /// reported, not at the moment the marker reached the pipeline. The provider only
+    /// learns the utterance's id when its VAD commits, which is later - under semantic
+    /// VAD, deliberately so - and that wait is time the listener spends waiting. Losing
+    /// the backdating here shortens every cascade measurement by exactly the VAD's
+    /// deliberation, which is the bias that made cascade look faster than it is.
+    /// </summary>
+    [Fact]
+    public async Task SpeechEndMark_IsBackdated_ToTheProvidersAcousticBoundary()
+    {
+        var stream = new FakeSttStream();
+        var pipeline = CreatePipeline(new FakeSttProvider(stream), new FakeTranslationProvider(_ => Tokens("Hola")), []);
+        var sink = new FakeEventSink();
+
+        await pipeline.OnSessionStartedAsync(new CascadeSessionConfig("en", "es"), sink, CancellationToken.None);
+        var acousticEndMs = CascadeClock.UtcNowMs() - 750;
+        stream.Emit(SttSegment.SpeechEnd("utt-1", 5, acousticEndMs));
+
+        var mark = await sink.Marks.Reader.ReadAsync(TestTimeout());
+
+        Assert.Equal(CascadeLatencyStages.SpeechEnd, mark.Stage);
+        Assert.Equal(acousticEndMs, mark.ServerTimeMs);
+
+        await pipeline.OnSessionEndedAsync(sink, CancellationToken.None);
+    }
+
+    /// <summary>
     /// Confirms one spoken utterance produces all seven latency marks (#10), in the
     /// order the cascade actually reaches those boundaries - speechEnd, then the STT
     /// pair, then the MT pair, then the TTS pair - each keyed by the same source

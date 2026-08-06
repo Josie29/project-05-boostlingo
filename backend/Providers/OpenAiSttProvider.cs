@@ -116,6 +116,16 @@ public sealed class OpenAiSttProvider(
         // Time Protocol) adjustment, producing negative or inflated stage latencies.
         private readonly long _startTick = Environment.TickCount64;
 
+        /// <summary>
+        /// <see cref="CascadeClock"/> time of the most recent
+        /// <c>input_audio_buffer.speech_stopped</c>, held until the
+        /// <c>input_audio_buffer.committed</c> that names the utterance arrives - only
+        /// commit carries the <c>item_id</c> every mark for this utterance keys by, but
+        /// only speech_stopped marks where the speaker actually stopped. Consumed (and
+        /// cleared) on that commit, so a commit with no preceding stop backdates nothing.
+        /// </summary>
+        private long? _speechStoppedAtServerMs;
+
         /// <inheritdoc />
         /// <exception cref="SttProviderStreamException">Thrown when the underlying
         /// socket can no longer accept a send (e.g. it has already closed).</exception>
@@ -235,17 +245,22 @@ public sealed class OpenAiSttProvider(
                 case "input_audio_buffer.committed":
                     // The VAD (Voice Activity Detection; semantic_vad - see
                     // OpenAiSttProvider.VadType) decided this utterance's speech is
-                    // complete and committed it as a new conversation item: the
-                    // earliest cross-network "speech end" signal available, ahead of
-                    // any transcript text. item_id here is the same id the delta/completed
-                    // events for this same utterance will use, so CascadePipeline's
-                    // speechEnd latency mark keys by the same utteranceId every other
-                    // stage's mark for this utterance uses. Not yet spot-checked against
-                    // a live OPENAI_API_KEY - see this field's caveat in
-                    // docs/tech-stack.md alongside the semantic_vad decision itself.
-                    return GetItemIdOrSkip(root, type) is { } committedItemId
-                        ? SttSegment.SpeechEnd(committedItemId, timestampMs)
-                        : null;
+                    // complete and committed it as a new conversation item. This is the
+                    // first event carrying an item_id - the same id the delta/completed
+                    // events for this utterance will use - so it is what CascadePipeline's
+                    // speechEnd mark must key by. It is *not* when speech ended, though:
+                    // that was speech_stopped, held below and handed over here so the
+                    // mark can be backdated to the acoustic boundary. Not yet
+                    // spot-checked against a live OPENAI_API_KEY - see this field's caveat
+                    // in docs/tech-stack.md alongside the semantic_vad decision itself.
+                    if (GetItemIdOrSkip(root, type) is not { } committedItemId)
+                    {
+                        return null;
+                    }
+
+                    var acousticEndAtServerMs = _speechStoppedAtServerMs;
+                    _speechStoppedAtServerMs = null;
+                    return SttSegment.SpeechEnd(committedItemId, timestampMs, acousticEndAtServerMs);
 
                 case "input_audio_buffer.speech_started":
                     // The VAD detected the speaker beginning a new utterance - no
@@ -257,8 +272,13 @@ public sealed class OpenAiSttProvider(
                     return SttSegment.SpeechStart(timestampMs);
 
                 case "input_audio_buffer.speech_stopped":
-                    // Only tells us the speaker paused, which needs no reaction on its
-                    // own - nothing to key a segment or latency mark by from this alone.
+                    // Where the perceived-latency window opens (docs/BRIEF.md: speech end
+                    // -> first audio out). It carries no item_id, so it can't key a mark
+                    // on its own; stamped here and handed to the commit above, which can.
+                    // Overwriting an unconsumed value is correct: if two stops arrive
+                    // before any commit, the later one is the boundary of the utterance
+                    // that commit will name.
+                    _speechStoppedAtServerMs = CascadeClock.UtcNowMs();
                     return null;
 
                 case "error":

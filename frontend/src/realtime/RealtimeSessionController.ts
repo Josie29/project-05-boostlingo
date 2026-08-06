@@ -30,6 +30,13 @@ const DISCONNECT_GRACE_MS = 5_000;
  * a backend change for a frontend-only feature (issue #3's live transcript
  * panel needs to hear back what the *caller* said, not just the
  * interpretation).
+ *
+ * It also pins turn detection to the same VAD (Voice Activity Detection) the
+ * cascade's STT session requests (`OpenAiSttProvider.VadType`). Left unset,
+ * this session would take the Realtime API's default instead, and the two
+ * modes would be deciding "the speaker is done" by different algorithms — the
+ * event both modes' latency windows open on. The benchmark is a comparison of
+ * architectures, so turn detection has to be held constant across them.
  */
 const ENABLE_INPUT_TRANSCRIPTION_EVENT = {
   type: 'session.update',
@@ -39,6 +46,9 @@ const ENABLE_INPUT_TRANSCRIPTION_EVENT = {
       input: {
         transcription: {
           model: 'gpt-4o-mini-transcribe',
+        },
+        turn_detection: {
+          type: 'semantic_vad',
         },
       },
     },

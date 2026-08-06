@@ -216,14 +216,23 @@ public static class CascadeLatencyMarks
     /// <param name="events">Sink to send the mark on - the same one the stage's own data event used.</param>
     /// <param name="logger">Logs a send failure at Debug; never rethrown.</param>
     /// <param name="cancellationToken">Propagates session cancellation.</param>
+    /// <param name="serverTimeMs">Backdates the mark to a moment already observed on this
+    /// same clock, for a stage whose true boundary precedes the event that reveals it -
+    /// see <see cref="SttSegment.AcousticEndAtServerMs"/>. Omit to stamp on emission,
+    /// which is correct for every stage whose boundary <em>is</em> the event.</param>
     public static async Task EmitAsync(
-        string utteranceId, string stage, ICascadeEventSink events, ILogger logger, CancellationToken cancellationToken)
+        string utteranceId,
+        string stage,
+        ICascadeEventSink events,
+        ILogger logger,
+        CancellationToken cancellationToken,
+        long? serverTimeMs = null)
     {
         try
         {
             await events.SendEventAsync(
                 CascadeMessageTypes.LatencyMark,
-                new CascadeLatencyMarkPayload(utteranceId, stage, CascadeClock.UtcNowMs()),
+                new CascadeLatencyMarkPayload(utteranceId, stage, serverTimeMs ?? CascadeClock.UtcNowMs()),
                 cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

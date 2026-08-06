@@ -173,22 +173,31 @@ public class OpenAiSttProviderTests
         Assert.Equal(SttSegmentKind.SpeechEnd, marker.Kind);
         Assert.Equal("item-1", marker.UtteranceId);
         Assert.Equal(string.Empty, marker.Text);
+        // No speech_stopped preceded it, so there is nothing to backdate to and the
+        // consumer must stamp on arrival rather than invent a boundary.
+        Assert.Null(marker.AcousticEndAtServerMs);
     }
 
     /// <summary>
-    /// Confirms speech_stopped - which just means the speaker paused, needing no
-    /// reaction on its own - produces no segment at all, unlike speech_started (#11,
-    /// barge-in detection; see the sibling test below).
+    /// The perceived-latency window opens where the speaker stopped talking
+    /// (docs/BRIEF.md), but only the later commit carries the item_id every mark for
+    /// the utterance keys by. Confirms the stream carries the speech_stopped instant
+    /// forward onto the commit's marker so CascadePipeline can backdate the speechEnd
+    /// mark to it - without this, the VAD's deliberation before committing falls
+    /// outside the measured window and cascade's latency reads lower than it is.
     /// </summary>
     [Fact]
-    public async Task ReadSegmentsAsync_IgnoresSpeechStoppedEvent()
+    public async Task ReadSegmentsAsync_CarriesSpeechStoppedInstant_OntoTheCommittedMarker()
     {
         var socketFactory = new FakeRealtimeSocketFactory();
         var provider = CreateProvider(socketFactory, apiKey: "sk-test");
         var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
         var socket = socketFactory.CreatedSockets[0];
 
+        var beforeMs = CascadeClock.UtcNowMs();
         socket.EnqueueIncoming("""{"type":"input_audio_buffer.speech_stopped"}""");
+        socket.EnqueueIncoming(
+            """{"type":"input_audio_buffer.committed","previous_item_id":null,"item_id":"item-1"}""");
         socket.EnqueueIncoming(null);
 
         var segments = new List<SttSegment>();
@@ -197,7 +206,43 @@ public class OpenAiSttProviderTests
             segments.Add(segment);
         }
 
-        Assert.Empty(segments);
+        // speech_stopped itself still yields no segment - it has no id to key one by.
+        var marker = Assert.Single(segments);
+        Assert.Equal(SttSegmentKind.SpeechEnd, marker.Kind);
+        Assert.NotNull(marker.AcousticEndAtServerMs);
+        Assert.InRange(marker.AcousticEndAtServerMs!.Value, beforeMs, CascadeClock.UtcNowMs());
+    }
+
+    /// <summary>
+    /// Confirms a held speech_stopped instant is consumed by the commit that uses it,
+    /// so a later commit with no stop of its own (a reconnect, a provider that skips
+    /// the event) is stamped on arrival rather than backdated to a stale boundary from
+    /// a previous utterance - which would report a wildly inflated latency.
+    /// </summary>
+    [Fact]
+    public async Task ReadSegmentsAsync_DoesNotReuseASpeechStoppedInstant_ForALaterCommit()
+    {
+        var socketFactory = new FakeRealtimeSocketFactory();
+        var provider = CreateProvider(socketFactory, apiKey: "sk-test");
+        var stream = await provider.StartStreamAsync(new SttStreamConfig("en"), CancellationToken.None);
+        var socket = socketFactory.CreatedSockets[0];
+
+        socket.EnqueueIncoming("""{"type":"input_audio_buffer.speech_stopped"}""");
+        socket.EnqueueIncoming(
+            """{"type":"input_audio_buffer.committed","previous_item_id":null,"item_id":"item-1"}""");
+        socket.EnqueueIncoming(
+            """{"type":"input_audio_buffer.committed","previous_item_id":"item-1","item_id":"item-2"}""");
+        socket.EnqueueIncoming(null);
+
+        var segments = new List<SttSegment>();
+        await foreach (var segment in stream.ReadSegmentsAsync(CancellationToken.None))
+        {
+            segments.Add(segment);
+        }
+
+        Assert.Equal(2, segments.Count);
+        Assert.NotNull(segments[0].AcousticEndAtServerMs);
+        Assert.Null(segments[1].AcousticEndAtServerMs);
     }
 
     /// <summary>

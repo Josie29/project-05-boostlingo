@@ -61,8 +61,6 @@ describe('CascadeLatencyTracker', () => {
       { stage: 'mtFinal', ms: 200 },
     ]);
     expect(report?.stages.every((stage) => stage.ms >= 0)).toBe(true);
-    // The headline is unaffected: it is always ttsFirstByte - speechEnd.
-    expect(tracker.handleFirstChunkTiming({ utteranceId: 'utt_1', clientReceiveToAudibleMs: 20 }).endToEndMs).toBe(820);
   });
 
   // Catches a crash/corruption bug: the very first mark an utterance ever
@@ -77,17 +75,42 @@ describe('CascadeLatencyTracker', () => {
     expect(report).toEqual({ utteranceId: 'utt_1', stages: [], endToEndMs: null });
   });
 
-  // Catches the exact formula bug issue #10 specifies: endToEndMs is the
-  // server-relative speechEnd -> ttsFirstByte span *plus* the client-only
-  // receive-to-audible span — never just one half, and never a raw mark
-  // mistaken for the total.
-  it('computes endToEndMs as speechEnd-to-ttsFirstByte plus the client receive-to-audible span, once both are known', () => {
-    const tracker = new CascadeLatencyTracker();
-    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_000));
-    tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 1_800)); // 800ms server-relative span.
-    const report = tracker.handleFirstChunkTiming({ utteranceId: 'utt_1-target', clientReceiveToAudibleMs: 50 });
+  // The brief measures perceived latency at the listener: speech end -> first
+  // audio out. Catches a return to the server-span-plus-playback formula, which
+  // left both network legs (client->server audio, server->client audio) outside
+  // the number the benchmark reports.
+  it('measures endToEndMs on the client clock, from learning speech ended to audio being audible', () => {
+    let clientNow = 5_000;
+    const tracker = new CascadeLatencyTracker({ now: () => clientNow });
+    // Server stamps are deliberately far from the client clock: mixing the two
+    // would produce a wildly wrong total rather than a subtly wrong one.
+    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_700_000_000_000));
+    clientNow = 5_400;
+    tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 1_700_000_000_800));
+    const report = tracker.handleFirstChunkTiming({
+      utteranceId: 'utt_1-target',
+      clientReceiveToAudibleMs: 50,
+      audibleAtMs: 5_900,
+    });
 
-    expect(report.endToEndMs).toBe(850);
+    expect(report.endToEndMs).toBe(900);
+  });
+
+  // Catches the window opening on a later speechEnd re-delivery (a duplicate or
+  // retried mark) and silently shortening every utterance's measured latency.
+  it('opens the window at the first speechEnd mark, not a later duplicate', () => {
+    let clientNow = 1_000;
+    const tracker = new CascadeLatencyTracker({ now: () => clientNow });
+    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_700_000_000_000));
+    clientNow = 1_600;
+    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_700_000_000_000));
+    const report = tracker.handleFirstChunkTiming({
+      utteranceId: 'utt_1-target',
+      clientReceiveToAudibleMs: 10,
+      audibleAtMs: 2_000,
+    });
+
+    expect(report.endToEndMs).toBe(1_000);
   });
 
   // Catches the target/source utteranceId mismatch bug this adapter exists to bridge:
@@ -97,10 +120,16 @@ describe('CascadeLatencyTracker', () => {
   // on a different report than the server-side marks and endToEndMs would never
   // resolve.
   it('resolves TTS playback timing against the same report as the source-lane marks, by stripping the "-target" suffix', () => {
-    const tracker = new CascadeLatencyTracker();
-    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_000));
-    tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 1_500));
-    const report = tracker.handleFirstChunkTiming({ utteranceId: 'utt_1-target', clientReceiveToAudibleMs: 20 });
+    let clientNow = 1_000;
+    const tracker = new CascadeLatencyTracker({ now: () => clientNow });
+    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_700_000_000_000));
+    clientNow = 1_400;
+    tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 1_700_000_000_500));
+    const report = tracker.handleFirstChunkTiming({
+      utteranceId: 'utt_1-target',
+      clientReceiveToAudibleMs: 20,
+      audibleAtMs: 1_520,
+    });
 
     expect(report.utteranceId).toBe('utt_1');
     expect(report.endToEndMs).toBe(520);

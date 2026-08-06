@@ -33,12 +33,39 @@ audio drift, or unbounded memory growth.
 5. Cost: pull actual token/audio usage for the session window from the OpenAI
    (and Anthropic) usage dashboards; divide by session minutes.
 
+## How the two modes are held comparable
+
+The brief's number is *perceived* latency — speech end → first audio out — so
+both modes measure the same window, on the same clock, opened by the same
+event. Three things enforce that; changing any of them invalidates a
+cross-mode comparison:
+
+- **Same turn detection.** Both sessions request `semantic_vad`
+  (`OpenAiSttProvider.VadType`, and `session.update` in
+  `RealtimeSessionController`). Left to defaults the Realtime session would use
+  a different VAD, and the two modes would disagree about when the speaker
+  finished — the event the whole window hangs off.
+- **Same opening edge.** The window opens where the speaker stopped talking.
+  Cascade's provider only names the utterance at *commit*, later than the
+  acoustic boundary, so the STT stream carries the `speech_stopped` instant
+  forward and the `speechEnd` mark is backdated to it. The VAD's deliberation
+  therefore sits inside the measurement, where the listener experiences it.
+- **One clock per measurement.** Both modes' end-to-end is a client-clock
+  subtraction: cascade from receiving the `speechEnd` mark to its first audio
+  becoming audible; realtime from `input_audio_buffer.speech_stopped` to
+  `output_audio_buffer.started`. Server-stamped marks still carry cascade's
+  stage *breakdown* — they attribute the time, the client measures it. Stage
+  medians therefore won't sum to the total; the remainder is wire time.
+
+Known residual, stated rather than corrected: realtime's closing edge is when
+the browser learns the server began sending audio, not when sound leaves the
+speaker, because per-turn audibility isn't observable over WebRTC. Cascade's
+closing edge *is* audibility (Web Audio schedules it). Realtime is therefore
+understated by its jitter-buffer playout — tens of ms against a target of
+1500 ms, and in the direction that flatters realtime.
+
 ## Results — Realtime
 
-Measurement note: Realtime's end-to-end spans VAD speech-stopped →
-`output_audio_buffer.started` (server begins sending audio), client clock.
-Slightly understates perceived latency: audibility isn't observable per turn
-over WebRTC, so network + jitter-buffer playout (tens of ms) fall outside it.
 The breakdown splits into `responseCreated` and `audioStart`.
 
 | Metric | Target | Measured |
@@ -53,7 +80,7 @@ The breakdown splits into `responseCreated` and `audioStart`.
 
 | Metric | Target | Measured |
 | --- | --- | --- |
-| End-to-end, median (speech end → playback start) | < 3 s (target < 2 s) | _pending_ |
+| Perceived latency, median (speech end → first audio audible) | < 3 s (target < 2 s) | _pending_ |
 | End-to-end, p95 | — | _pending_ |
 | speechEnd → sttFinal, median | — | _pending_ |
 | sttFinal → mtFirstToken, median | — | _pending_ |

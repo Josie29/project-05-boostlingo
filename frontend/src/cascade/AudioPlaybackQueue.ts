@@ -25,6 +25,13 @@ export interface FirstChunkTiming {
   /** The utteranceId as seen on `CascadeAudioEvent` — the *target*-lane id, not the source-lane id `latency.mark`s use (see `cascadeLatencyAdapter.ts`'s `toSourceUtteranceId`). */
   utteranceId: string;
   clientReceiveToAudibleMs: number;
+  /**
+   * The local-clock moment this utterance's first audio actually becomes
+   * audible — the closing edge of the brief's perceived-latency window. The
+   * span above only describes the playback leg; this absolute reading is what
+   * lets the tracker measure the whole window on one clock, wire time included.
+   */
+  audibleAtMs: number;
 }
 
 type FirstChunkTimingListener = (timing: FirstChunkTiming) => void;
@@ -211,7 +218,7 @@ export class AudioPlaybackQueue {
       const audibleAtMs = this.contextAnchorNowMs + (startTime - this.contextAnchorTime) * 1000;
       const clientReceiveToAudibleMs = audibleAtMs - receivedAtMs;
       for (const listener of this.firstChunkListeners) {
-        listener({ utteranceId, clientReceiveToAudibleMs });
+        listener({ utteranceId, clientReceiveToAudibleMs, audibleAtMs });
       }
     }
   }

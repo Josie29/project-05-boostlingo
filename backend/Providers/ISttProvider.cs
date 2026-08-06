@@ -37,8 +37,18 @@ public enum SttSegmentKind
 /// <param name="Kind">Which of the four kinds this segment is.</param>
 /// <param name="TimestampMs">Milliseconds since the stream started, for latency
 /// instrumentation and ordering.</param>
+/// <param name="AcousticEndAtServerMs">On <see cref="SttSegmentKind.SpeechEnd"/> markers
+/// only: the wall-clock (<see cref="CascadeClock"/>) moment the provider's VAD reported
+/// the speaker had <em>stopped talking</em>, which is what the brief's perceived-latency
+/// window opens on. A marker rides on the provider's <em>commit</em> of the utterance,
+/// and commit lands later than the acoustic boundary by however long the VAD takes to
+/// decide the turn is over - under semantic VAD that wait is deliberate and can be
+/// substantial. Backdating the speechEnd mark to this value keeps that wait inside the
+/// measured window instead of silently outside it. <c>null</c> when the provider gave no
+/// separate speech-stopped signal, in which case the consumer falls back to stamping the
+/// mark on arrival.</param>
 public sealed record SttSegment(
-    string UtteranceId, string Text, SttSegmentKind Kind, long TimestampMs)
+    string UtteranceId, string Text, SttSegmentKind Kind, long TimestampMs, long? AcousticEndAtServerMs = null)
 {
     /// <summary>
     /// Creates a speech-end boundary marker (#10, per-stage latency instrumentation):
@@ -50,9 +60,10 @@ public sealed record SttSegment(
     /// </summary>
     /// <param name="utteranceId">The id this utterance's later transcript segments will share.</param>
     /// <param name="timestampMs">Milliseconds since the stream started.</param>
+    /// <param name="acousticEndAtServerMs">See <see cref="AcousticEndAtServerMs"/>.</param>
     /// <returns>A <see cref="SttSegmentKind.SpeechEnd"/> marker segment with empty text.</returns>
-    public static SttSegment SpeechEnd(string utteranceId, long timestampMs) =>
-        new(utteranceId, Text: string.Empty, SttSegmentKind.SpeechEnd, timestampMs);
+    public static SttSegment SpeechEnd(string utteranceId, long timestampMs, long? acousticEndAtServerMs = null) =>
+        new(utteranceId, Text: string.Empty, SttSegmentKind.SpeechEnd, timestampMs, acousticEndAtServerMs);
 
     /// <summary>
     /// Creates a speech-onset marker (#11, barge-in detection): no transcript text,

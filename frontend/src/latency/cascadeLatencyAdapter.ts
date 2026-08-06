@@ -31,14 +31,24 @@ export function toSourceUtteranceId(utteranceId: string): string {
 export interface FirstChunkTiming {
   utteranceId: string;
   clientReceiveToAudibleMs: number;
+  /** Local-clock moment the first audio became audible — the window's closing edge. */
+  audibleAtMs: number;
+}
+
+/** Collaborators the tracker needs; swapped in tests for a deterministic clock. */
+export interface CascadeLatencyTrackerDeps {
+  /** The same local clock `AudioPlaybackQueue` stamps its timings with — real `performance.now()` in production. */
+  now: () => number;
 }
 
 /** One utterance's accumulated raw marks/timing, not yet reduced into a display-ready {@link LatencyReport}. */
 interface UtteranceLatencyState {
   /** `serverTimeMs` for every stage mark seen so far, keyed by stage name. */
   marks: Partial<Record<CascadeStage, number>>;
-  /** Local client-only span from first-TTS-chunk receipt to its scheduled audible time, ms — set at most once per utterance. Never mixed with a server timestamp. */
-  clientReceiveToAudibleMs: number | null;
+  /** Local-clock moment this client learned speech had ended — the window's opening edge. */
+  clientSpeechEndAtMs: number | null;
+  /** Local-clock moment this utterance's first audio became audible. */
+  clientAudibleAtMs: number | null;
 }
 
 /** The wire shape of a `latency.mark` envelope's payload, loosely typed pending validation. */
@@ -81,12 +91,15 @@ function readLatencyMark(rawEvent: unknown): { utteranceId: string; stage: Casca
  * "the interval that ended at this mark", whichever mark opened it — not
  * necessarily the canonical predecessor, which may be missing or later.
  *
- * `endToEndMs` is `ttsFirstByte - speechEnd` (both server clock — the
- * server-relative span issue #10 specifies) plus the local
- * `clientReceiveToAudibleMs` span (client receipt of that first audio frame
- * to its actually-scheduled/audible time) — two same-clock differences
- * summed, per the clock-discipline the issue calls out, never `null - null`
- * or a partial cross-clock guess. `null` until both halves are known.
+ * `endToEndMs` is the brief's perceived latency — speech end → first audio out
+ * — measured end to end on the *client's* clock: from this client receiving the
+ * `speechEnd` mark to its first audio actually becoming audible. Both readings
+ * come from `deps.now()`, so it stays a same-clock subtraction, and unlike the
+ * earlier server-span-plus-playback formula it leaves no leg uncounted: the
+ * round trip a listener genuinely waits through is inside the number rather
+ * than falling in the gap between a server stamp and a client one. The
+ * server-clock stage marks still carry the breakdown; they attribute the time,
+ * this measures it. `null` until both edges are known.
  */
 function buildReport(utteranceId: string, state: UtteranceLatencyState): LatencyReport {
   const stages: LatencyStageTiming[] = [];
@@ -110,11 +123,10 @@ function buildReport(utteranceId: string, state: UtteranceLatencyState): Latency
     previousMarkMs = markMs;
   }
 
-  const speechEndMs = state.marks.speechEnd;
-  const ttsFirstByteMs = state.marks.ttsFirstByte;
-  const serverSpanMs = speechEndMs !== undefined && ttsFirstByteMs !== undefined ? ttsFirstByteMs - speechEndMs : null;
   const endToEndMs =
-    serverSpanMs !== null && state.clientReceiveToAudibleMs !== null ? serverSpanMs + state.clientReceiveToAudibleMs : null;
+    state.clientSpeechEndAtMs !== null && state.clientAudibleAtMs !== null
+      ? state.clientAudibleAtMs - state.clientSpeechEndAtMs
+      : null;
 
   return { utteranceId, stages, endToEndMs };
 }
@@ -130,6 +142,11 @@ function buildReport(utteranceId: string, state: UtteranceLatencyState): Latency
  */
 export class CascadeLatencyTracker {
   private readonly utterances = new Map<string, UtteranceLatencyState>();
+  private readonly now: () => number;
+
+  constructor(deps: CascadeLatencyTrackerDeps = { now: () => performance.now() }) {
+    this.now = deps.now;
+  }
 
   /** Clears every utterance accumulated so far, for a fresh session. */
   reset(): void {
@@ -139,7 +156,7 @@ export class CascadeLatencyTracker {
   private getOrCreate(utteranceId: string): UtteranceLatencyState {
     let state = this.utterances.get(utteranceId);
     if (!state) {
-      state = { marks: {}, clientReceiveToAudibleMs: null };
+      state = { marks: {}, clientSpeechEndAtMs: null, clientAudibleAtMs: null };
       this.utterances.set(utteranceId, state);
     }
     return state;
@@ -158,6 +175,12 @@ export class CascadeLatencyTracker {
 
     const state = this.getOrCreate(mark.utteranceId);
     state.marks[mark.stage] = mark.serverTimeMs;
+    // The speechEnd mark's *arrival* is the earliest this client can know speech
+    // ended, so it opens the client-clock window. Its server timestamp still
+    // anchors the stage breakdown; the two clocks stay unmixed.
+    if (mark.stage === 'speechEnd' && state.clientSpeechEndAtMs === null) {
+      state.clientSpeechEndAtMs = this.now();
+    }
     return buildReport(mark.utteranceId, state);
   }
 
@@ -170,7 +193,7 @@ export class CascadeLatencyTracker {
   handleFirstChunkTiming(timing: FirstChunkTiming): LatencyReport {
     const utteranceId = toSourceUtteranceId(timing.utteranceId);
     const state = this.getOrCreate(utteranceId);
-    state.clientReceiveToAudibleMs = timing.clientReceiveToAudibleMs;
+    state.clientAudibleAtMs = timing.audibleAtMs;
     return buildReport(utteranceId, state);
   }
 }

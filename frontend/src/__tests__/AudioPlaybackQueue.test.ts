@@ -441,8 +441,8 @@ describe('AudioPlaybackQueue', () => {
 
       expect(sources[1].start).toHaveBeenCalledWith(1);
       expect(timings).toEqual([
-        { utteranceId: 'u1', clientReceiveToAudibleMs: 0 },
-        { utteranceId: 'u2', clientReceiveToAudibleMs: 500 },
+        { utteranceId: 'u1', clientReceiveToAudibleMs: 0, audibleAtMs: 0 },
+        { utteranceId: 'u2', clientReceiveToAudibleMs: 500, audibleAtMs: 1000 },
       ]);
     });
 
