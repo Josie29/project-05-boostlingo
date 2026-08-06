@@ -166,6 +166,42 @@ export interface ConversationMetricsPayload {
   wer?: number;
   /** Name of the replayed fixture; omitted for live sessions. */
   fixture?: string;
+  /** The fixture's reference transcript, stored so past runs can re-render their diff. */
+  groundTruth?: string;
+}
+
+/** One stored conversation in full, per `GET /api/metrics/conversations/{id}` — what the run report renders. */
+export interface ConversationDetail {
+  conversationId: string;
+  sourceLang: string;
+  targetLang: string;
+  translationProvider: string;
+  sttModel: string;
+  mtModel: string;
+  ttsModel: string;
+  startedAtMs: number;
+  endedAtMs: number;
+  kind: string;
+  wer: number | null;
+  fixture: string | null;
+  groundTruth: string | null;
+  utterances: UtteranceMetricsPayload[];
+  transcript: TranscriptEntryPayload[];
+}
+
+/**
+ * Fetches one stored conversation in full.
+ *
+ * @param conversationId - The conversation to load.
+ * @returns The stored detail.
+ * @throws {Error} If the request fails or the id is unknown (404).
+ */
+export async function getConversationDetail(conversationId: string): Promise<ConversationDetail> {
+  const response = await fetch(`/api/metrics/conversations/${encodeURIComponent(conversationId)}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch conversation detail (status ${response.status})`);
+  }
+  return (await response.json()) as ConversationDetail;
 }
 
 /** One stored conversation, as returned by `GET /api/metrics/conversations` — a Lab table row. */

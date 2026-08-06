@@ -188,6 +188,57 @@ public class MetricsEndpointsTests : IDisposable
     }
 
     /// <summary>
+    /// Catches a past run being unopenable: the detail endpoint must return the full
+    /// stored conversation (utterances with stages, transcript, ground truth), and an
+    /// unknown id must 404 with the { error } body shape.
+    /// </summary>
+    [Fact]
+    public async Task ConversationDetail_RoundTripsFullRun_And404sUnknownIds()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+        var run = new
+        {
+            conversationId = "conv-detail",
+            sourceLang = "en",
+            targetLang = "es",
+            startedAtMs = 1_000L,
+            endedAtMs = 2_000L,
+            kind = "experiment",
+            wer = 0.25,
+            fixture = "practice.m4a",
+            groundTruth = "take one tablet daily",
+            utterances = new object[]
+            {
+                new
+                {
+                    utteranceId = "cascade:u1",
+                    mode = "cascade",
+                    endToEndMs = 1500.0,
+                    stages = new object[] { new { stage = "sttFinal", ms = 300.0 } },
+                },
+            },
+            transcript = new object[]
+            {
+                new { utteranceId = "cascade:u1", lane = "source", text = "take a tablet daily", final = true },
+            },
+        };
+        await client.PostAsJsonAsync(MetricsEndpoints.ConversationsRoute, run);
+
+        var detail = await client.GetFromJsonAsync<JsonElement>($"{MetricsEndpoints.ConversationsRoute}/conv-detail");
+
+        Assert.Equal("take one tablet daily", detail.GetProperty("groundTruth").GetString());
+        Assert.Equal(0.25, detail.GetProperty("wer").GetDouble());
+        var utterance = Assert.Single(detail.GetProperty("utterances").EnumerateArray());
+        Assert.Equal("sttFinal", Assert.Single(utterance.GetProperty("stages").EnumerateArray()).GetProperty("stage").GetString());
+        var entry = Assert.Single(detail.GetProperty("transcript").EnumerateArray());
+        Assert.Equal("take a tablet daily", entry.GetProperty("text").GetString());
+
+        var missing = await client.GetAsync($"{MetricsEndpoints.ConversationsRoute}/nope");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    /// <summary>
     /// Catches a benchmark session recorded before any data exists rendering a broken
     /// dashboard: the query endpoints must return well-formed empty shapes, not errors,
     /// when nothing has been captured yet.

@@ -98,6 +98,7 @@ describe('runCascadeExperiment', () => {
     expect(payload.kind).toBe('experiment');
     expect(payload.wer).toBe(0);
     expect(payload.fixture).toBe('benchmark-en-es.wav');
+    expect(payload.groundTruth).toBe('all tests pass');
     expect(payload.mtProvider).toBe('anthropic');
     expect(payload.utterances).toHaveLength(1);
     expect(session.stageModels).toEqual({ mtProvider: 'anthropic' });

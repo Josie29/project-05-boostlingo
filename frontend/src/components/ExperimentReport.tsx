@@ -1,5 +1,20 @@
 import type { LatencyReport } from '../latency/types';
-import type { ExperimentResult } from '../lab/experimentRunner';
+import type { WerResult } from '../lab/wer';
+import type { TranscriptEntry } from '../transcript/types';
+
+/**
+ * What the report renders — built either from a just-finished runner result
+ * or from a stored conversation's detail fetch (see `LabPanel`). `wer` is
+ * `null` for runs with no ground truth (live sessions): the WER tiles and
+ * diff simply don't render, and the transcript/latency evidence stands alone.
+ */
+export interface ExperimentReportData {
+  title: string;
+  wer: WerResult | null;
+  transcript: TranscriptEntry[];
+  latencyReports: LatencyReport[];
+  utteranceCount: number;
+}
 
 /**
  * Buckets a cascade stage mark into the pipeline segment it belongs to, for
@@ -33,12 +48,12 @@ function percentile(sorted: number[], p: number): number {
 }
 
 /**
- * The evidence behind a finished experiment run: verdict tiles, the word-level
- * alignment of ground truth vs. what STT heard, the source/target transcript
- * pair, and one row per utterance with its pipeline-segment breakdown. The
- * scores stay, as headlines over the evidence.
+ * The evidence behind a run: verdict tiles, the word-level alignment of
+ * ground truth vs. what STT heard, the source/target transcript pair, and one
+ * row per utterance with its pipeline-segment breakdown. The scores stay, as
+ * headlines over the evidence.
  */
-export function ExperimentReport({ result }: { result: ExperimentResult }) {
+export function ExperimentReport({ data: result }: { data: ExperimentReportData }) {
   const { wer } = result;
   const endToEnd = result.latencyReports
     .map((report) => report.endToEndMs)
@@ -64,22 +79,26 @@ export function ExperimentReport({ result }: { result: ExperimentResult }) {
 
   return (
     <div className="experiment-report">
-      <p className="experiment-report__title">Run report · {result.fixtureName}</p>
+      <p className="experiment-report__title">{result.title}</p>
 
       <div className="experiment-report__tiles">
-        <div className="experiment-report__tile">
-          <span className="experiment-report__tile-label">WER</span>
-          <b>{(wer.wer * 100).toFixed(1)}%</b>
-          <small>
-            {wer.substitutions + wer.insertions + wer.deletions} errors / {wer.referenceWords} words
-          </small>
-        </div>
-        <div className="experiment-report__tile">
-          <span className="experiment-report__tile-label">Errors</span>
-          <b>
-            {wer.substitutions}S · {wer.insertions}I · {wer.deletions}D
-          </b>
-        </div>
+        {wer !== null && (
+          <>
+            <div className="experiment-report__tile">
+              <span className="experiment-report__tile-label">WER</span>
+              <b>{(wer.wer * 100).toFixed(1)}%</b>
+              <small>
+                {wer.substitutions + wer.insertions + wer.deletions} errors / {wer.referenceWords} words
+              </small>
+            </div>
+            <div className="experiment-report__tile">
+              <span className="experiment-report__tile-label">Errors</span>
+              <b>
+                {wer.substitutions}S · {wer.insertions}I · {wer.deletions}D
+              </b>
+            </div>
+          </>
+        )}
         <div className="experiment-report__tile">
           <span className="experiment-report__tile-label">e2e median</span>
           <b>{median !== null ? formatMs(median) : '—'}</b>
@@ -91,6 +110,8 @@ export function ExperimentReport({ result }: { result: ExperimentResult }) {
         </div>
       </div>
 
+      {wer !== null && (
+        <>
       <p className="experiment-report__section">Recognition vs ground truth</p>
       <p className="experiment-report__diff">
         {wer.ops.map((op, index) => {
@@ -122,6 +143,8 @@ export function ExperimentReport({ result }: { result: ExperimentResult }) {
       <p className="experiment-report__legend">
         struck+replacement = substituted · dotted underline = inserted · struck alone = dropped
       </p>
+        </>
+      )}
 
       <div className="experiment-report__pair">
         <div className="experiment-report__lane">

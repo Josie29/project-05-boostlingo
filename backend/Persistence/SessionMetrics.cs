@@ -79,6 +79,9 @@ public enum TranscriptLane
 /// <param name="Wer">Word Error Rate of the run's STT output against its ground truth
 /// (Lab P3) — computed client-side, where both texts live. <c>null</c> for live sessions.</param>
 /// <param name="Fixture">Name of the replayed fixture (e.g. the audio file), or <c>null</c> for live sessions.</param>
+/// <param name="GroundTruth">The fixture's reference transcript, stored so a past run's
+/// WER diff can be re-rendered later (recomputed client-side by the same scorer — the
+/// diff itself is never persisted, so scoring can't drift from storage).</param>
 public sealed record ConversationMetricsReport(
     string ConversationId,
     string SourceLang,
@@ -91,7 +94,44 @@ public sealed record ConversationMetricsReport(
     string? MtProvider = null,
     string? Kind = null,
     double? Wer = null,
-    string? Fixture = null);
+    string? Fixture = null,
+    string? GroundTruth = null);
+
+/// <summary>
+/// One stored conversation in full, as returned by <c>GET /api/metrics/conversations/{id}</c> -
+/// everything the run report renders, reusing the same records the save accepted.
+/// </summary>
+/// <param name="ConversationId">The conversation's id.</param>
+/// <param name="SourceLang">Language tag the speaker used.</param>
+/// <param name="TargetLang">Language tag interpreted into.</param>
+/// <param name="TranslationProvider">Stamped MT provider.</param>
+/// <param name="SttModel">Stamped STT model.</param>
+/// <param name="MtModel">Stamped MT model.</param>
+/// <param name="TtsModel">Stamped TTS model.</param>
+/// <param name="StartedAtMs">Client clock at Start.</param>
+/// <param name="EndedAtMs">Client clock at Stop.</param>
+/// <param name="Kind"><c>"live"</c> or <c>"experiment"</c>.</param>
+/// <param name="Wer">Stored Word Error Rate, or <c>null</c>.</param>
+/// <param name="Fixture">Fixture name, or <c>null</c>.</param>
+/// <param name="GroundTruth">Stored reference transcript, or <c>null</c>.</param>
+/// <param name="Utterances">Per-utterance latency breakdowns.</param>
+/// <param name="Transcript">The conversation's transcript entries.</param>
+public sealed record ConversationDetail(
+    string ConversationId,
+    string SourceLang,
+    string TargetLang,
+    string TranslationProvider,
+    string SttModel,
+    string MtModel,
+    string TtsModel,
+    long StartedAtMs,
+    long EndedAtMs,
+    string Kind,
+    double? Wer,
+    string? Fixture,
+    string? GroundTruth,
+    IReadOnlyList<UtteranceMetricsRecord> Utterances,
+    IReadOnlyList<TranscriptEntryRecord> Transcript);
 
 /// <summary>
 /// One utterance's latency breakdown - the persisted form of the frontend's

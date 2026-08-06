@@ -1,12 +1,10 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { ExperimentReport } from '../components/ExperimentReport';
+import { ExperimentReport, type ExperimentReportData } from '../components/ExperimentReport';
 import { computeWer } from '../lab/wer';
-import type { ExperimentResult } from '../lab/experimentRunner';
 
-const RESULT: ExperimentResult = {
-  conversationId: 'exp-1',
-  fixtureName: 'benchmark-practice.m4a',
+const RESULT: ExperimentReportData = {
+  title: 'Run report · benchmark-practice.m4a',
   wer: computeWer('take one tablet daily', 'take a tablet twice daily'),
   utteranceCount: 2,
   transcript: [
@@ -32,7 +30,7 @@ describe('ExperimentReport', () => {
   // Catches the report reverting to a bare verdict: the WER headline, the
   // error-kind breakdown, and the latency medians must all be on screen.
   it('renders the verdict tiles', () => {
-    render(<ExperimentReport result={RESULT} />);
+    render(<ExperimentReport data={RESULT} />);
 
     expect(screen.getByText('50.0%')).toBeInTheDocument();
     expect(screen.getByText('1S · 1I · 0D')).toBeInTheDocument();
@@ -43,7 +41,7 @@ describe('ExperimentReport', () => {
   // (struck original, marked replacement), and an insertion must be marked —
   // structure, not color alone.
   it('renders substitutions with both words and marks insertions', () => {
-    render(<ExperimentReport result={RESULT} />);
+    render(<ExperimentReport data={RESULT} />);
 
     expect(screen.getByText('one').tagName).toBe('DEL');
     expect(screen.getByText('a').tagName).toBe('MARK');
@@ -53,7 +51,7 @@ describe('ExperimentReport', () => {
   // Catches the caller's actual experience going missing: both lanes' text
   // must render, in order.
   it('renders the source and target transcript pair', () => {
-    render(<ExperimentReport result={RESULT} />);
+    render(<ExperimentReport data={RESULT} />);
 
     expect(screen.getByText('take a tablet twice daily')).toBeInTheDocument();
     expect(screen.getByText('tome una tableta')).toBeInTheDocument();
@@ -62,8 +60,20 @@ describe('ExperimentReport', () => {
   // Catches the slowest utterance hiding in the crowd: the worst end-to-end
   // row must be flagged.
   it('flags the slowest utterance', () => {
-    render(<ExperimentReport result={RESULT} />);
+    render(<ExperimentReport data={RESULT} />);
 
     expect(screen.getByText('3000ms ▲')).toBeInTheDocument();
+  });
+
+  // Catches a live session's detail view pretending it was scored: with no
+  // ground truth the WER tiles and diff must be absent while the transcript
+  // and latency evidence still render.
+  it('omits the WER sections when there is no ground truth', () => {
+    render(<ExperimentReport data={{ ...RESULT, wer: null }} />);
+
+    expect(screen.queryByText(/%$/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Recognition vs ground truth')).not.toBeInTheDocument();
+    expect(screen.getByText('take a tablet twice daily')).toBeInTheDocument();
+    expect(screen.getByText('2250ms')).toBeInTheDocument();
   });
 });

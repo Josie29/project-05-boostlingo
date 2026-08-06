@@ -77,6 +77,7 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             ("wer", "REAL NULL"),
             ("fixture", "TEXT NULL"),
             ("baseline", "INTEGER NOT NULL DEFAULT 0"),
+            ("ground_truth", "TEXT NULL"),
         ];
         foreach (var (name, definition) in added.Where(column => !existing.Contains(column.Name)))
         {
@@ -108,7 +109,8 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
             kind TEXT NOT NULL DEFAULT 'live',
             wer REAL NULL,
             fixture TEXT NULL,
-            baseline INTEGER NOT NULL DEFAULT 0
+            baseline INTEGER NOT NULL DEFAULT 0,
+            ground_truth TEXT NULL
         );
 
         CREATE TABLE IF NOT EXISTS utterances (
@@ -173,13 +175,14 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         {
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, mt_model, tts_model, kind, baseline, wer, fixture)
-                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, $mtModel, $ttsModel, $kind, $baseline, $wer, $fixture)
+                INSERT INTO conversations (id, source_lang, target_lang, translation_provider, started_at_ms, ended_at_ms, stt_model, mt_model, tts_model, kind, baseline, wer, fixture, ground_truth)
+                VALUES ($id, $sourceLang, $targetLang, $translationProvider, $startedAtMs, $endedAtMs, $sttModel, $mtModel, $ttsModel, $kind, $baseline, $wer, $fixture, $groundTruth)
                 """;
             insert.Parameters.AddWithValue("$kind", report.Kind ?? "live");
             insert.Parameters.AddWithValue("$baseline", wasBaseline ? 1 : 0);
             insert.Parameters.AddWithValue("$wer", (object?)report.Wer ?? DBNull.Value);
             insert.Parameters.AddWithValue("$fixture", (object?)report.Fixture ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$groundTruth", (object?)report.GroundTruth ?? DBNull.Value);
             insert.Parameters.AddWithValue("$id", report.ConversationId);
             insert.Parameters.AddWithValue("$sourceLang", report.SourceLang);
             insert.Parameters.AddWithValue("$targetLang", report.TargetLang);
@@ -309,6 +312,109 @@ public sealed class SqliteSessionMetricsStore : ISessionMetricsStore
         }
 
         return listings;
+    }
+
+    /// <inheritdoc />
+    public async Task<ConversationDetail?> GetConversationDetailAsync(
+        string conversationId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        ConversationDetail? header = null;
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT id, source_lang, target_lang, translation_provider, stt_model, mt_model, tts_model,
+                       started_at_ms, ended_at_ms, kind, wer, fixture, ground_truth
+                FROM conversations WHERE id = $id
+                """;
+            command.Parameters.AddWithValue("$id", conversationId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                header = new ConversationDetail(
+                    ConversationId: reader.GetString(0),
+                    SourceLang: reader.GetString(1),
+                    TargetLang: reader.GetString(2),
+                    TranslationProvider: reader.GetString(3),
+                    SttModel: reader.GetString(4),
+                    MtModel: reader.GetString(5),
+                    TtsModel: reader.GetString(6),
+                    StartedAtMs: reader.GetInt64(7),
+                    EndedAtMs: reader.GetInt64(8),
+                    Kind: reader.GetString(9),
+                    Wer: reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                    Fixture: reader.IsDBNull(11) ? null : reader.GetString(11),
+                    GroundTruth: reader.IsDBNull(12) ? null : reader.GetString(12),
+                    Utterances: [],
+                    Transcript: []);
+            }
+        }
+
+        if (header is null)
+        {
+            return null;
+        }
+
+        var stagesByUtterance = new Dictionary<string, List<StageTimingRecord>>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                "SELECT utterance_id, stage, ms FROM utterance_stages WHERE conversation_id = $id ORDER BY rowid";
+            command.Parameters.AddWithValue("$id", conversationId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var utteranceId = reader.GetString(0);
+                if (!stagesByUtterance.TryGetValue(utteranceId, out var stages))
+                {
+                    stages = [];
+                    stagesByUtterance[utteranceId] = stages;
+                }
+
+                stages.Add(new StageTimingRecord(reader.GetString(1), reader.GetDouble(2)));
+            }
+        }
+
+        var utterances = new List<UtteranceMetricsRecord>();
+        await using (var command = connection.CreateCommand())
+        {
+            // rowid preserves insertion order, which is the run's appearance order.
+            command.CommandText =
+                "SELECT utterance_id, mode, end_to_end_ms FROM utterances WHERE conversation_id = $id ORDER BY rowid";
+            command.Parameters.AddWithValue("$id", conversationId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var utteranceId = reader.GetString(0);
+                utterances.Add(new UtteranceMetricsRecord(
+                    utteranceId,
+                    InterpreterModes.FromWire(reader.GetString(1)),
+                    reader.IsDBNull(2) ? null : reader.GetDouble(2),
+                    stagesByUtterance.TryGetValue(utteranceId, out var stages) ? stages : []));
+            }
+        }
+
+        var transcript = new List<TranscriptEntryRecord>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                "SELECT utterance_id, lane, text, final, truncated FROM transcript_entries WHERE conversation_id = $id ORDER BY rowid";
+            command.Parameters.AddWithValue("$id", conversationId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                transcript.Add(new TranscriptEntryRecord(
+                    reader.GetString(0),
+                    reader.GetString(1) == "source" ? TranscriptLane.Source : TranscriptLane.Target,
+                    reader.GetString(2),
+                    reader.GetInt64(3) != 0,
+                    reader.GetInt64(4) != 0));
+            }
+        }
+
+        return header with { Utterances = utterances, Transcript = transcript };
     }
 
     /// <inheritdoc />

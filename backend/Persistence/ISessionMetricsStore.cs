@@ -26,6 +26,12 @@ public interface ISessionMetricsStore
     /// <returns>Lightweight per-conversation listings (no per-utterance detail).</returns>
     Task<IReadOnlyList<ConversationListing>> ListConversationsAsync(CancellationToken cancellationToken);
 
+    /// <summary>Loads one conversation in full - what the run report renders.</summary>
+    /// <param name="conversationId">The conversation to load.</param>
+    /// <param name="cancellationToken">Cancels the query.</param>
+    /// <returns>The stored detail, or <c>null</c> when the id is unknown.</returns>
+    Task<ConversationDetail?> GetConversationDetailAsync(string conversationId, CancellationToken cancellationToken);
+
     /// <summary>
     /// Computes cross-conversation latency statistics grouped per (mode, MT provider) -
     /// the numbers <c>docs/benchmarks.md</c>'s result tables are filled from.

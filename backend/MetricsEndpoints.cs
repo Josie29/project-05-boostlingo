@@ -23,6 +23,7 @@ public static class MetricsEndpoints
     {
         app.MapPost(ConversationsRoute, HandleSaveConversation);
         app.MapGet(ConversationsRoute, HandleListConversations);
+        app.MapGet($"{ConversationsRoute}/{{conversationId}}", HandleGetConversationDetail);
         app.MapGet(SummaryRoute, HandleGetSummary);
         app.MapPost(BaselineRoute, HandleSetBaseline);
         return app;
@@ -112,6 +113,16 @@ public static class MetricsEndpoints
             : OpenAiTranslationProvider.Model;
         return new ResolvedStageConfig(
             provider, report.SttModel ?? StageModels.SttModels[0], mtModel, OpenAiTtsProvider.Model);
+    }
+
+    /// <summary>Returns one conversation in full - what the run report renders - or 404.</summary>
+    private static async Task<IResult> HandleGetConversationDetail(
+        string conversationId, ISessionMetricsStore store, CancellationToken cancellationToken)
+    {
+        var detail = await store.GetConversationDetailAsync(conversationId, cancellationToken);
+        return detail is null
+            ? Results.NotFound(new MetricsErrorResponse($"No conversation '{conversationId}'."))
+            : Results.Ok(detail);
     }
 
     /// <summary>Lists every stored conversation, most recently started first.</summary>

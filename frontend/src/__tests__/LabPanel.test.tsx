@@ -57,6 +57,26 @@ const CURRENT_SUMMARY = {
   ],
 };
 
+const DETAIL = {
+  conversationId: 'conv-1',
+  sourceLang: 'en',
+  targetLang: 'es',
+  translationProvider: 'openai',
+  sttModel: 'gpt-4o-mini-transcribe',
+  mtModel: 'gpt-4o-mini',
+  ttsModel: 'gpt-4o-mini-tts',
+  startedAtMs: 1_754_400_000_000,
+  endedAtMs: 1_754_400_060_000,
+  kind: 'experiment',
+  wer: 0.25,
+  fixture: 'practice.m4a',
+  groundTruth: 'take one tablet daily',
+  utterances: [
+    { utteranceId: 'cascade:u1', mode: 'cascade', endToEndMs: 1500, stages: [{ stage: 'sttFinal', ms: 300 }] },
+  ],
+  transcript: [{ utteranceId: 'cascade:u1', lane: 'source', text: 'take a tablet daily', final: true }],
+};
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -66,9 +86,11 @@ beforeEach(() => {
       ? BASELINE_SUMMARY
       : path.includes('scope=current')
         ? CURRENT_SUMMARY
-        : path.includes('/baseline')
-          ? {}
-          : { conversations: CONVERSATIONS };
+        : path.includes('/api/metrics/conversations/')
+          ? DETAIL
+          : path.includes('/baseline')
+            ? {}
+            : { conversations: CONVERSATIONS };
     return Promise.resolve({ ok: true, status: 200, json: async () => body });
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -119,6 +141,20 @@ describe('LabPanel', () => {
     render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
 
     expect(await screen.findByRole('button', { name: 'Pinned' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  // Catches a stored run being unopenable: View must fetch the detail and render
+  // the same report — including the WER diff recomputed from the stored ground
+  // truth (the substituted word appears struck).
+  it('opens a stored run into the report from its View button', async () => {
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
+    await screen.findByText('Cascade');
+
+    fireEvent.click(screen.getByRole('button', { name: 'View' }));
+
+    expect(await screen.findByText('experiment · practice.m4a')).toBeInTheDocument();
+    expect(screen.getByText('25.0%')).toBeInTheDocument();
+    expect(screen.getByText('one').tagName).toBe('DEL');
   });
 
   // Catches the escape hatch missing: clearing must post an empty baseline set.

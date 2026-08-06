@@ -1,15 +1,58 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  getConversationDetail,
   getConversations,
   getSummary,
   pinBaseline,
   type CascadeStageModels,
+  type ConversationDetail,
   type ConversationListing,
   type LanguagePair,
   type SummaryGroup,
 } from '../api';
 import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
-import { ExperimentReport } from './ExperimentReport';
+import { computeWer } from '../lab/wer';
+import { ExperimentReport, type ExperimentReportData } from './ExperimentReport';
+
+/** Adapts a just-finished runner result to what the report renders. */
+function reportFromResult(result: ExperimentResult): ExperimentReportData {
+  return {
+    title: `Run report · ${result.fixtureName}`,
+    wer: result.wer,
+    transcript: result.transcript,
+    latencyReports: result.latencyReports,
+    utteranceCount: result.utteranceCount,
+  };
+}
+
+/**
+ * Adapts a stored conversation to the same report. The WER diff is recomputed
+ * here from the stored ground truth and hypothesis with the same scorer the
+ * run used — the alignment is never persisted, so it can't drift from storage.
+ */
+function reportFromDetail(detail: ConversationDetail): ExperimentReportData {
+  const hypothesis = detail.transcript
+    .filter((entry) => entry.lane === 'source')
+    .map((entry) => entry.text)
+    .join(' ');
+  return {
+    title: `${detail.kind} · ${detail.fixture ?? new Date(detail.startedAtMs).toLocaleString()}`,
+    wer: detail.groundTruth === null ? null : computeWer(detail.groundTruth, hypothesis),
+    transcript: detail.transcript.map((entry) => ({
+      id: entry.utteranceId,
+      lane: entry.lane,
+      text: entry.text,
+      final: entry.final,
+      ...(entry.truncated ? { truncated: true } : {}),
+    })),
+    latencyReports: detail.utterances.map((utterance) => ({
+      utteranceId: utterance.utteranceId,
+      stages: utterance.stages,
+      endToEndMs: utterance.endToEndMs,
+    })),
+    utteranceCount: detail.utterances.length,
+  };
+}
 
 export interface LabPanelProps {
   /** Language pair experiments run with — the same one Live sessions use. */
@@ -75,6 +118,7 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
   const [runPhase, setRunPhase] = useState<ExperimentPhase | null>(null);
   const [runResult, setRunResult] = useState<ExperimentResult | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ExperimentReportData | null>(null);
 
   const refresh = useCallback(() => {
     // group='mode': the progress pane compares paradigms; the MT provider is one of
@@ -104,6 +148,12 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
     pinBaseline(pinned)
       .then(refresh)
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Failed to update the baseline.'));
+  }
+
+  function viewConversation(conversationId: string): void {
+    getConversationDetail(conversationId)
+      .then((loaded) => setDetail(reportFromDetail(loaded)))
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Failed to load the run.'));
   }
 
   function clearBaseline(): void {
@@ -212,7 +262,7 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
           {runPhase !== null && <p className="lab-panel__empty">{PHASE_LABEL[runPhase]}</p>}
           {runError !== null && <p className="lab-panel__error">{runError}</p>}
         </div>
-        {runResult !== null && <ExperimentReport result={runResult} />}
+        {runResult !== null && <ExperimentReport data={reportFromResult(runResult)} />}
       </section>
 
       <section className="lab-panel" aria-label="Experiments">
@@ -224,6 +274,14 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
         </div>
 
         {error !== null && <p className="lab-panel__error">{error}</p>}
+        {detail !== null && (
+          <div className="lab-panel__detail">
+            <ExperimentReport data={detail} />
+            <button type="button" className="lab-panel__refresh" onClick={() => setDetail(null)}>
+              Close
+            </button>
+          </div>
+        )}
         {conversations !== null && conversations.length === 0 && (
           <p className="lab-panel__empty">No sessions captured yet. Run a session and press Stop — it lands here.</p>
         )}
@@ -242,6 +300,7 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
                   <th>RT e2e med</th>
                   <th>CAS e2e med</th>
                   <th>WER</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -285,6 +344,15 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
                     <td>{formatMs(conversation.realtimeEndToEndMedianMs)}</td>
                     <td>{formatMs(conversation.cascadeEndToEndMedianMs)}</td>
                     <td>{conversation.wer == null ? '—' : `${(conversation.wer * 100).toFixed(1)}%`}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="lab-panel__pin"
+                        onClick={() => viewConversation(conversation.conversationId)}
+                      >
+                        View
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

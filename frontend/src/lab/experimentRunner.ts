@@ -154,6 +154,7 @@ export async function runCascadeExperiment(
     kind: 'experiment',
     wer: wer.wer,
     fixture: config.fixtureName,
+    groundTruth: config.groundTruth,
   };
   await deps.report(payload);
 
