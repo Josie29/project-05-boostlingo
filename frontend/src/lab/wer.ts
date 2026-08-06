@@ -4,6 +4,13 @@
  * metric. Pure so it runs under plain Vitest.
  */
 
+/** One step of the alignment, in reading order — what the diff view renders. Words are the normalized tokens. */
+export type WerOp =
+  | { kind: 'match'; word: string }
+  | { kind: 'substitution'; reference: string; hypothesis: string }
+  | { kind: 'insertion'; word: string }
+  | { kind: 'deletion'; word: string };
+
 export interface WerResult {
   /** (substitutions + insertions + deletions) / reference word count. Can exceed 1 with enough insertions. */
   wer: number;
@@ -11,6 +18,8 @@ export interface WerResult {
   insertions: number;
   deletions: number;
   referenceWords: number;
+  /** The full word-by-word alignment, in reading order. */
+  ops: WerOp[];
 }
 
 /**
@@ -42,7 +51,14 @@ export function computeWer(reference: string, hypothesis: string): WerResult {
   const hyp = normalizeForWer(hypothesis);
 
   if (ref.length === 0) {
-    return { wer: hyp.length === 0 ? 0 : 1, substitutions: 0, insertions: hyp.length, deletions: 0, referenceWords: 0 };
+    return {
+      wer: hyp.length === 0 ? 0 : 1,
+      substitutions: 0,
+      insertions: hyp.length,
+      deletions: 0,
+      referenceWords: 0,
+      ops: hyp.map((word) => ({ kind: 'insertion', word })),
+    };
   }
 
   // cost[i][j] = edit distance between ref[0..i) and hyp[0..j).
@@ -56,7 +72,9 @@ export function computeWer(reference: string, hypothesis: string): WerResult {
     }
   }
 
-  // Backtrace to attribute the distance to substitutions/insertions/deletions.
+  // Backtrace to attribute the distance to substitutions/insertions/deletions
+  // and record the word-by-word alignment the diff view renders.
+  const ops: WerOp[] = [];
   let substitutions = 0;
   let insertions = 0;
   let deletions = 0;
@@ -64,17 +82,25 @@ export function computeWer(reference: string, hypothesis: string): WerResult {
   let j = hyp.length;
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0 && cost[i][j] === cost[i - 1][j - 1] + (ref[i - 1] === hyp[j - 1] ? 0 : 1)) {
-      if (ref[i - 1] !== hyp[j - 1]) substitutions++;
+      if (ref[i - 1] !== hyp[j - 1]) {
+        substitutions++;
+        ops.push({ kind: 'substitution', reference: ref[i - 1], hypothesis: hyp[j - 1] });
+      } else {
+        ops.push({ kind: 'match', word: ref[i - 1] });
+      }
       i--;
       j--;
     } else if (j > 0 && cost[i][j] === cost[i][j - 1] + 1) {
       insertions++;
+      ops.push({ kind: 'insertion', word: hyp[j - 1] });
       j--;
     } else {
       deletions++;
+      ops.push({ kind: 'deletion', word: ref[i - 1] });
       i--;
     }
   }
+  ops.reverse();
 
   return {
     wer: (substitutions + insertions + deletions) / ref.length,
@@ -82,5 +108,6 @@ export function computeWer(reference: string, hypothesis: string): WerResult {
     insertions,
     deletions,
     referenceWords: ref.length,
+    ops,
   };
 }

@@ -6,11 +6,11 @@ import {
 } from '../api';
 import { CascadeSessionController } from '../cascade/CascadeSessionController';
 import { latencyReducer } from '../latency/latencyReducer';
-import { INITIAL_LATENCY_STATE, type LatencyState } from '../latency/types';
+import { INITIAL_LATENCY_STATE, type LatencyReport, type LatencyState } from '../latency/types';
 import { CascadeInterpreterSession } from '../session/CascadeInterpreterSession';
 import { modeOfPrefixedId, type InterpreterSession } from '../session/InterpreterSession';
 import { transcriptReducer } from '../transcript/transcriptReducer';
-import { INITIAL_TRANSCRIPT_STATE, type TranscriptState } from '../transcript/types';
+import { INITIAL_TRANSCRIPT_STATE, type TranscriptEntry, type TranscriptState } from '../transcript/types';
 import { createFixtureMicStream, type FixtureMicStream } from './audioFixture';
 import { computeWer, type WerResult } from './wer';
 
@@ -26,8 +26,13 @@ export interface ExperimentConfig {
 
 export interface ExperimentResult {
   conversationId: string;
+  fixtureName: string;
   wer: WerResult;
   utteranceCount: number;
+  /** Every transcript entry the run produced, both lanes — the report's evidence. */
+  transcript: TranscriptEntry[];
+  /** Every utterance's latency breakdown, in appearance order. */
+  latencyReports: LatencyReport[];
 }
 
 export type ExperimentPhase = 'decoding' | 'running' | 'draining' | 'scoring';
@@ -152,5 +157,12 @@ export async function runCascadeExperiment(
   };
   await deps.report(payload);
 
-  return { conversationId, wer, utteranceCount: latency.reports.length };
+  return {
+    conversationId,
+    fixtureName: config.fixtureName,
+    wer,
+    utteranceCount: latency.reports.length,
+    transcript: transcript.entries,
+    latencyReports: latency.reports,
+  };
 }

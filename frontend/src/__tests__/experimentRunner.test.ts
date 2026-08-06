@@ -102,6 +102,11 @@ describe('runCascadeExperiment', () => {
     expect(payload.utterances).toHaveLength(1);
     expect(session.stageModels).toEqual({ mtProvider: 'anthropic' });
     expect(session.stopCalls).toBe(1);
+
+    // The report renders from the result — the evidence must come back, not just scores.
+    expect(result.transcript).toHaveLength(3);
+    expect(result.latencyReports).toHaveLength(1);
+    expect(result.fixtureName).toBe('benchmark-en-es.wav');
   });
 
   // Catches a truncated run being scored as if the model performed badly: a

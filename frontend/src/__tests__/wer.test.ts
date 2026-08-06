@@ -41,4 +41,18 @@ describe('computeWer', () => {
     expect(computeWer('', '').wer).toBe(0);
     expect(computeWer('', 'something recognized').wer).toBe(1);
   });
+
+  // Catches the diff view rendering errors out of order or with the wrong words:
+  // the ops list must be the alignment in reading order, matches included.
+  it('returns the word-by-word alignment in reading order', () => {
+    const result = computeWer('take one tablet daily', 'take a tablet twice daily');
+
+    expect(result.ops).toEqual([
+      { kind: 'match', word: 'take' },
+      { kind: 'substitution', reference: 'one', hypothesis: 'a' },
+      { kind: 'match', word: 'tablet' },
+      { kind: 'insertion', word: 'twice' },
+      { kind: 'match', word: 'daily' },
+    ]);
+  });
 });

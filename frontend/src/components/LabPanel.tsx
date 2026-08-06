@@ -9,6 +9,7 @@ import {
   type SummaryGroup,
 } from '../api';
 import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
+import { ExperimentReport } from './ExperimentReport';
 
 export interface LabPanelProps {
   /** Language pair experiments run with — the same one Live sessions use. */
@@ -210,14 +211,8 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
           </button>
           {runPhase !== null && <p className="lab-panel__empty">{PHASE_LABEL[runPhase]}</p>}
           {runError !== null && <p className="lab-panel__error">{runError}</p>}
-          {runResult !== null && (
-            <p className="lab-panel__run-result">
-              WER {(runResult.wer.wer * 100).toFixed(1)}% over {runResult.wer.referenceWords} reference words (
-              {runResult.wer.substitutions} sub · {runResult.wer.insertions} ins · {runResult.wer.deletions} del) —{' '}
-              {runResult.utteranceCount} utterances captured.
-            </p>
-          )}
         </div>
+        {runResult !== null && <ExperimentReport result={runResult} />}
       </section>
 
       <section className="lab-panel" aria-label="Experiments">
