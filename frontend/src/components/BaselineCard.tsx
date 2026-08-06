@@ -1,5 +1,15 @@
 import type { SummaryGroup } from '../api';
-import { compareStages, stageFamily, stageLabel, stageScope, stageSpan, StageScope } from '../latency/stageLabels';
+import { isCascadeStage } from '../latency/cascadeStages';
+import {
+  compareStages,
+  FAMILY_LABEL,
+  stageFamily,
+  stageLabel,
+  stageScope,
+  stageSpan,
+  StageScope,
+  type StageFamily,
+} from '../latency/stageLabels';
 import { BENCHMARK_TARGET_MS } from '../latency/targets';
 import type { SessionMode } from '../session/InterpreterSession';
 
@@ -29,7 +39,9 @@ interface WaterfallRow {
   key: string;
   label: string;
   title?: string;
-  family: string;
+  /** The stage labels folded into this row — the tooltip, when there is more than one. */
+  members: string[];
+  family: StageFamily;
   ms: number;
   /** Elapsed when this row began; where its bar starts in the running-total frame. */
   startMs: number;
@@ -56,16 +68,35 @@ function buildRows(group: SummaryGroup): WaterfallRow[] {
   const rows: WaterfallRow[] = [];
   let elapsed = 0;
 
+  // One row per subsystem, not per mark. Cascade instruments two boundaries
+  // inside STT and two inside MT ("first output", then "finished"), which reads
+  // as five unrelated steps unless you already know the pipeline. Summed, they
+  // are the three stages the brief names. A family with a single mark keeps that
+  // mark's own label — realtime has no separate STT to speak of.
   for (const { stage, stats } of sorted.filter(({ stage }) => stageScope(stage) === StageScope.Perceived)) {
-    rows.push({
-      key: stage,
-      label: stageLabel(stage),
-      title: stageSpan(stage),
-      family: stageFamily(stage),
-      ms: stats.medianMs,
-      startMs: elapsed,
-      after: false,
-    });
+    const family = stageFamily(stage);
+    // Cascade's marks always read as the subsystem that owns them, even where
+    // only one lands inside the window, so the rows stay parallel: speech to
+    // text, translation, voice. Realtime's two marks are one model's own
+    // boundaries with no subsystem to name, so they keep their labels.
+    const grouped = isCascadeStage(stage) && family !== 'other';
+    const open = rows.at(-1);
+    if (grouped && open?.family === family) {
+      open.ms += stats.medianMs;
+      open.members.push(stageLabel(stage));
+      open.title = open.members.join(' → ');
+    } else {
+      rows.push({
+        key: stage,
+        label: grouped ? FAMILY_LABEL[family] : stageLabel(stage),
+        title: stageSpan(stage),
+        members: [stageLabel(stage)],
+        family,
+        ms: stats.medianMs,
+        startMs: elapsed,
+        after: false,
+      });
+    }
     elapsed += stats.medianMs;
   }
 
@@ -74,6 +105,7 @@ function buildRows(group: SummaryGroup): WaterfallRow[] {
       key: stage,
       label: stageLabel(stage),
       title: stageSpan(stage),
+      members: [stageLabel(stage)],
       family: stageFamily(stage),
       ms: stats.medianMs,
       startMs: elapsed,

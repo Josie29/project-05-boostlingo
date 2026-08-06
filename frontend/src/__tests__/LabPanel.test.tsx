@@ -32,6 +32,8 @@ const BASELINE_SUMMARY = {
       utteranceCount: 3,
       endToEnd: { count: 3, medianMs: 2457, p95Ms: 3000 },
       stages: [
+        { stage: 'sttFirstPartial', stats: { count: 3, medianMs: 300, p95Ms: 400 } },
+        { stage: 'sttFinal', stats: { count: 3, medianMs: 500, p95Ms: 600 } },
         { stage: 'ttsFirstByte', stats: { count: 3, medianMs: 998, p95Ms: 1200 } },
         { stage: 'ttsEnd', stats: { count: 3, medianMs: 787, p95Ms: 900 } },
       ],
@@ -87,7 +89,13 @@ describe('LabPanel', () => {
     // Scoped to the pane: the conversations table below repeats the same median.
     const pane = within(screen.getByRole('region', { name: 'Baseline' }));
     expect(pane.getByText('2.46s')).toBeInTheDocument();
-    expect(pane.getByText('Synthesizing voice').closest('tr')).toHaveTextContent('+998ms');
+    // The two STT marks are one subsystem, so they read as one row that sums them
+    // rather than two steps nobody outside the pipeline can tell apart.
+    expect(pane.getByText('Speech to text').closest('tr')).toHaveTextContent('+800ms');
+    expect(pane.queryByText('Recognizing speech')).not.toBeInTheDocument();
+    // TTS contributes a single mark inside the window, but still reads as the
+    // subsystem, so the three cascade rows stay parallel.
+    expect(pane.getByText('Voice').closest('tr')).toHaveTextContent('+998ms');
     // ttsEnd is past first audio out, so it sits below the rule, outside the stack.
     expect(pane.getByText('Audio plays out').closest('tr')).toHaveAttribute('data-after', 'true');
   });
@@ -100,12 +108,12 @@ describe('LabPanel', () => {
     const pane = within(screen.getByRole('region', { name: 'Baseline' }));
 
     expect(pane.getByText('Step duration')).toBeInTheDocument();
-    expect(pane.getByText('Synthesizing voice').closest('tr')).toHaveTextContent('+998ms');
+    expect(pane.getByText('Voice').closest('tr')).toHaveTextContent('+998ms');
 
     fireEvent.click(screen.getByRole('button', { name: 'Running total' }));
 
     expect(pane.getByText('Clock at finish')).toBeInTheDocument();
-    expect(pane.getByText('Synthesizing voice').closest('tr')).toHaveTextContent('1.00s');
+    expect(pane.getByText('Voice').closest('tr')).toHaveTextContent('1.80s');
   });
 
   // Catches the pane collapsing to one card when only one mode is pinned.

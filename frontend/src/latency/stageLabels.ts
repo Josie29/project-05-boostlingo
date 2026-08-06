@@ -98,6 +98,17 @@ export function stageSpan(stage: string): string | undefined {
 }
 
 /**
+ * What to call a whole subsystem when its marks are shown as one row — the
+ * three stages the brief and the provider interfaces are named for. `other`
+ * never groups, so it has no label.
+ */
+export const FAMILY_LABEL: Record<Exclude<StageFamily, 'other'>, string> = {
+  stt: 'Speech to text',
+  mt: 'Translation',
+  tts: 'Voice',
+};
+
+/**
  * Which pipeline subsystem a stage belongs to — the bar's color. Realtime's
  * stages map onto the same three: one model does the work, but the listener is
  * still waiting on recognition, then on speech.
