@@ -14,6 +14,31 @@ describe('transcriptReducer', () => {
     expect(state.entries).toEqual([{ id: 'a', lane: 'source', text: 'Hel', final: false }]);
   });
 
+  // Catches the bug where a provider's own VAD segments silence or its own
+  // echo into an utterance, transcribes it to nothing, and the panel renders a
+  // blank row between two real utterances (observed in a live Realtime run).
+  it('drops a textless update for an utterance it has never seen', () => {
+    let state = transcriptReducer(INITIAL_TRANSCRIPT_STATE, { utteranceId: 'a', lane: 'source', text: '', final: true });
+    state = transcriptReducer(state, { utteranceId: 'b', lane: 'source', text: '', final: false });
+    state = transcriptReducer(state, { utteranceId: 'c', lane: 'source', text: '  ', final: true });
+
+    expect(state.entries).toEqual([]);
+  });
+
+  // Catches the bug where a provider that resends nothing on completion (an
+  // empty final after real deltas) blanks text the listener already read.
+  it('keeps accumulated text when a final update carries none', () => {
+    let state = transcriptReducer(INITIAL_TRANSCRIPT_STATE, {
+      utteranceId: 'a',
+      lane: 'source',
+      text: 'Hello',
+      final: false,
+    });
+    state = transcriptReducer(state, { utteranceId: 'a', lane: 'source', text: '', final: true });
+
+    expect(state.entries).toEqual([{ id: 'a', lane: 'source', text: 'Hello', final: true }]);
+  });
+
   // Catches the bug where a live-updating transcript re-renders as separate lines per
   // delta instead of one growing utterance (breaks "entries render incrementally" +
   // utterance grouping from the issue).
