@@ -37,6 +37,21 @@ export interface ExperimentResult {
 
 export type ExperimentPhase = 'decoding' | 'running' | 'draining' | 'scoring';
 
+/** The evidence accumulated so far, streamed to the UI as the replay runs. */
+export interface ExperimentSnapshot {
+  transcript: TranscriptEntry[];
+  latencyReports: LatencyReport[];
+}
+
+/** Optional run-progress hooks — the live view during a replay. All fire on the runner's own event flow; none affect the run. */
+export interface ExperimentObservers {
+  onPhase?: (phase: ExperimentPhase) => void;
+  /** Fires once, after decode, with the fixture's duration — the progress bar's denominator. */
+  onStarted?: (durationMs: number) => void;
+  /** Fires on every transcript/latency event with the accumulated evidence so far. */
+  onUpdate?: (snapshot: ExperimentSnapshot) => void;
+}
+
 /** Collaborators, swappable in tests for jsdom's lack of AudioContext/WebSocket and for deterministic time. */
 export interface ExperimentRunnerDeps {
   createFixtureStream: (file: Blob) => Promise<FixtureMicStream>;
@@ -78,21 +93,27 @@ export const DRAIN_MS = 8_000;
  */
 export async function runCascadeExperiment(
   config: ExperimentConfig,
-  onPhase?: (phase: ExperimentPhase) => void,
+  observers?: ExperimentObservers,
   deps: ExperimentRunnerDeps = defaultDeps(),
 ): Promise<ExperimentResult> {
+  const onPhase = observers?.onPhase;
   onPhase?.('decoding');
   const fixture = await deps.createFixtureStream(config.file);
+  observers?.onStarted?.(fixture.durationMs);
 
   const session = deps.createSession(fixture.stream);
   let transcript: TranscriptState = INITIAL_TRANSCRIPT_STATE;
   let latency: LatencyState = INITIAL_LATENCY_STATE;
+  const emitUpdate = () =>
+    observers?.onUpdate?.({ transcript: transcript.entries, latencyReports: latency.reports });
   const unsubscribes = [
     session.subscribeToTranscript((update) => {
       transcript = transcriptReducer(transcript, update);
+      emitUpdate();
     }),
     session.subscribeToLatency?.((report) => {
       latency = latencyReducer(latency, report);
+      emitUpdate();
     }),
   ];
 

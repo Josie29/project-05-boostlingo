@@ -110,6 +110,31 @@ describe('runCascadeExperiment', () => {
     expect(result.fixtureName).toBe('benchmark-en-es.wav');
   });
 
+  // Catches the live view staying blank while a replay runs: observers must get
+  // the fixture duration up front and accumulating evidence as events land.
+  it('streams accumulated evidence to observers as the run progresses', async () => {
+    const session = fakeSession({
+      transcript: [
+        { utteranceId: 'cascade:a', lane: 'source', text: 'all tests', final: true },
+        { utteranceId: 'cascade:b', lane: 'source', text: 'pass', final: true },
+      ],
+      latency: [{ utteranceId: 'cascade:a', stages: [], endToEndMs: 2_000 }],
+    });
+    const snapshots: { transcript: unknown[]; latencyReports: unknown[] }[] = [];
+    let startedDurationMs = 0;
+
+    await runCascadeExperiment(
+      CONFIG,
+      { onStarted: (durationMs) => { startedDurationMs = durationMs; }, onUpdate: (s) => snapshots.push(s) },
+      fakeDeps(session, []),
+    );
+
+    expect(startedDurationMs).toBe(1_000);
+    expect(snapshots.length).toBe(3);
+    expect(snapshots.at(-1)!.transcript).toHaveLength(2);
+    expect(snapshots.at(-1)!.latencyReports).toHaveLength(1);
+  });
+
   // Catches a truncated run being scored as if the model performed badly: a
   // session that died mid-replay must fail the experiment, not report it.
   it('fails (and does not report) when the session dies', async () => {

@@ -91,7 +91,10 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
                 {wer.substitutions + wer.insertions + wer.deletions} errors / {wer.referenceWords} words
               </small>
             </div>
-            <div className="experiment-report__tile">
+            <div
+              className="experiment-report__tile"
+              title="S = substituted (wrong word) · I = inserted (word nobody said) · D = deleted (word dropped)"
+            >
               <span className="experiment-report__tile-label">Errors</span>
               <b>
                 {wer.substitutions}S · {wer.insertions}I · {wer.deletions}D
@@ -102,7 +105,12 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
         <div className="experiment-report__tile">
           <span className="experiment-report__tile-label">e2e median</span>
           <b>{median !== null ? formatMs(median) : '—'}</b>
-          {p95 !== null && <small>p95 {formatMs(p95)}</small>}
+          {/* Nearest-rank p95 below ~5 samples is just the max (at n=1, the median itself) — show the sample size instead of a number that pretends to be a tail. */}
+          {p95 !== null && endToEnd.length >= 5 ? (
+            <small>p95 {formatMs(p95)}</small>
+          ) : (
+            <small>n={endToEnd.length}</small>
+          )}
         </div>
         <div className="experiment-report__tile">
           <span className="experiment-report__tile-label">Utterances</span>
@@ -160,6 +168,7 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
       {result.latencyReports.length > 0 && (
         <>
           <p className="experiment-report__section">Utterances · segments STT / MT / TTS</p>
+          <div className="experiment-report__utterances-scroll">
           <table className="experiment-report__utterances">
             <tbody>
               {result.latencyReports.map((report, index) => {
@@ -170,9 +179,7 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
                 return (
                   <tr key={report.utteranceId}>
                     <td className="experiment-report__utterance-index">{index + 1}</td>
-                    <td className="experiment-report__utterance-text" title={heard}>
-                      {heard.length > 44 ? `${heard.slice(0, 44)}…` : heard}
-                    </td>
+                    <td className="experiment-report__utterance-text">{heard}</td>
                     <td className="experiment-report__utterance-bar-cell">
                       {report.endToEndMs !== null && total > 0 && (
                         <span
@@ -195,6 +202,7 @@ export function ExperimentReport({ data: result }: { data: ExperimentReportData 
               })}
             </tbody>
           </table>
+          </div>
         </>
       )}
     </div>

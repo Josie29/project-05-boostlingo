@@ -1,5 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import { computeWer } from '../lab/wer';
+import { computeWer, groundTruthLines } from '../lab/wer';
+
+describe('groundTruthLines', () => {
+  // Catches the exact incident this exists for: pasting the benchmark doc's
+  // markdown table (and the headings around it) scored the IDs, word counts,
+  // and header as dropped words, inflating a clean run's WER.
+  it('keeps only the spoken lines out of a pasted doc section', () => {
+    const pasted = [
+      '## Utterances',
+      '',
+      '| ID | Utterance | Words |',
+      '| --- | --- | --- |',
+      '| H01 | Are you allergic to any medications? | 6 |',
+      '# en -> es',
+      'Take one tablet twice a day with food.',
+    ].join('\n');
+
+    expect(groundTruthLines(pasted)).toEqual(['Take one tablet twice a day with food.']);
+  });
+
+  // Catches plain ground truth being mangled: the common case must survive
+  // untouched apart from blank-line collapsing.
+  it('passes plain lines through unchanged', () => {
+    expect(groundTruthLines('Take one tablet daily.\n\nStop if swelling occurs.')).toEqual([
+      'Take one tablet daily.',
+      'Stop if swelling occurs.',
+    ]);
+  });
+
+  // Catches a paste that produced no scorable speech reaching the runner: an
+  // empty reference scores WER 1 and reads as a total model failure.
+  it('yields nothing when the paste is all chrome', () => {
+    expect(groundTruthLines('## Utterances\n| ID | Utterance |\n| --- | --- |')).toEqual([]);
+  });
+
+  // Catches the parse and the scorer disagreeing about what a word is — the
+  // reference the user approves in the preview is the one WER divides by.
+  it('feeds the scorer exactly the lines it returns', () => {
+    const lines = groundTruthLines('# notes\nTake one tablet daily.\n\nStop if swelling occurs.');
+
+    expect(computeWer(lines.join('\n'), lines.join(' ')).referenceWords).toBe(8);
+  });
+});
 
 describe('computeWer', () => {
   // Catches a perfect run scoring above zero — the sanity anchor every other case builds on.

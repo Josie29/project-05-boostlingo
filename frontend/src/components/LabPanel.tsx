@@ -11,8 +11,11 @@ import {
   type SummaryGroup,
 } from '../api';
 import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
-import { computeWer } from '../lab/wer';
+import { computeWer, groundTruthLines } from '../lab/wer';
+import type { TranscriptEntry } from '../transcript/types';
 import { ExperimentReport, type ExperimentReportData } from './ExperimentReport';
+import { GroundTruthField } from './GroundTruthField';
+import { TranscriptPanel } from './TranscriptPanel';
 
 /** Adapts a just-finished runner result to what the report renders. */
 function reportFromResult(result: ExperimentResult): ExperimentReportData {
@@ -120,6 +123,20 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
   const [runError, setRunError] = useState<string | null>(null);
   const [detail, setDetail] = useState<ExperimentReportData | null>(null);
 
+  const [liveEntries, setLiveEntries] = useState<TranscriptEntry[]>([]);
+  const [liveUtteranceCount, setLiveUtteranceCount] = useState(0);
+  const [runDurationMs, setRunDurationMs] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  // Ticks the progress bar along the file's own timeline while replaying —
+  // the replay is 1× by construction, so wall clock IS file position.
+  useEffect(() => {
+    if (runPhase !== 'running') return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 250);
+    return () => clearInterval(timer);
+  }, [runPhase]);
+
   const refresh = useCallback(() => {
     // group='mode': the progress pane compares paradigms; the MT provider is one of
     // the variables under test, not a separate comparison column.
@@ -162,15 +179,30 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Failed to clear the baseline.'));
   }
 
+  // The same parse the field previews — scoring an empty reference would report
+  // WER 1.0, which reads as a total model failure rather than an empty paste.
+  const utterances = groundTruthLines(groundTruth);
+
   function handleRun(): void {
     const file = fileRef.current?.files?.[0];
-    if (!file || groundTruth.trim() === '' || runPhase !== null) return;
+    if (!file || utterances.length === 0 || runPhase !== null) return;
 
     setRunResult(null);
     setRunError(null);
+    setLiveEntries([]);
+    setLiveUtteranceCount(0);
+    setRunDurationMs(null);
+    setElapsedMs(0);
     runCascadeExperiment(
-      { file, fixtureName: file.name, groundTruth, pair, models: stageModels },
-      setRunPhase,
+      { file, fixtureName: file.name, groundTruth: utterances.join('\n'), pair, models: stageModels },
+      {
+        onPhase: setRunPhase,
+        onStarted: setRunDurationMs,
+        onUpdate: (snapshot) => {
+          setLiveEntries(snapshot.transcript);
+          setLiveUtteranceCount(snapshot.latencyReports.length);
+        },
+      },
     )
       .then((result) => {
         setRunResult(result);
@@ -248,20 +280,44 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
         </p>
         <div className="lab-panel__run-form">
           <input ref={fileRef} type="file" accept="audio/*,video/*" aria-label="Fixture audio file" />
-          <textarea
-            className="lab-panel__ground-truth"
-            aria-label="Ground truth transcript"
-            placeholder="Paste the ground-truth transcript of the file's speech (e.g. from docs/benchmark-script.md)"
-            value={groundTruth}
-            onChange={(event) => setGroundTruth(event.target.value)}
-            rows={4}
-          />
-          <button type="button" className="lab-panel__refresh" onClick={handleRun} disabled={runPhase !== null}>
+
+          <GroundTruthField value={groundTruth} onChange={setGroundTruth} />
+
+          <button
+            type="button"
+            className="lab-panel__refresh"
+            onClick={handleRun}
+            disabled={runPhase !== null || utterances.length === 0}
+          >
             {runPhase === null ? 'Run experiment' : 'Running…'}
           </button>
           {runPhase !== null && <p className="lab-panel__empty">{PHASE_LABEL[runPhase]}</p>}
           {runError !== null && <p className="lab-panel__error">{runError}</p>}
         </div>
+        {runPhase !== null && runDurationMs !== null && (
+          <div className="lab-panel__live">
+            <div
+              className="lab-panel__progress-track"
+              role="progressbar"
+              aria-label="Replay position"
+              aria-valuemin={0}
+              aria-valuemax={Math.round(runDurationMs / 1000)}
+              aria-valuenow={Math.round(Math.min(elapsedMs, runDurationMs) / 1000)}
+            >
+              <span
+                className="lab-panel__progress-fill"
+                style={{
+                  width: `${runPhase === 'running' ? Math.min((elapsedMs / runDurationMs) * 100, 100) : 100}%`,
+                }}
+              />
+            </div>
+            <p className="lab-panel__live-status num">
+              {Math.round(Math.min(elapsedMs, runDurationMs) / 1000)}s / {Math.round(runDurationMs / 1000)}s ·{' '}
+              {liveUtteranceCount} utterances
+            </p>
+            {liveEntries.length > 0 && <TranscriptPanel entries={liveEntries} />}
+          </div>
+        )}
         {runResult !== null && <ExperimentReport data={reportFromResult(runResult)} />}
       </section>
 

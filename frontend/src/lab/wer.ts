@@ -38,6 +38,21 @@ export function normalizeForWer(text: string): string[] {
 }
 
 /**
+ * Splits pasted ground truth into the utterances to score: one per line in
+ * spoken order, with blank lines, `#` comments (which is also how a pasted
+ * markdown heading arrives), and `|` table rows dropped.
+ *
+ * The single seam between what the preview shows and what gets scored — both
+ * call this, so they cannot disagree.
+ */
+export function groundTruthLines(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#') && !line.startsWith('|'));
+}
+
+/**
  * Computes WER via the standard dynamic-programming edit distance, tracking
  * the three error kinds separately.
  *
