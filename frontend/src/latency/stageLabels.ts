@@ -11,24 +11,67 @@ import { CASCADE_STAGE_ORDER } from './cascadeStages';
  * delta from the preceding mark (`cascadeLatencyAdapter.buildReport`), so
  * "Recognizing speech: 184ms" is the honest reading of the number.
  */
+/**
+ * Whether a stage falls inside the brief's perceived-latency window — speech end
+ * → first audio out (`docs/BRIEF.md`). Everything up to first audio is time the
+ * listener spends waiting; anything after it elapses while they're already
+ * hearing the interpretation, so it must never be added to a latency figure.
+ */
+export const StageScope = {
+  Perceived: 'perceived',
+  AfterFirstAudio: 'afterFirstAudio',
+} as const;
+
+export type StageScope = (typeof StageScope)[keyof typeof StageScope];
+
 interface StageCopy {
   label: string;
   /** Which two marks the duration spans — surfaced as the row's tooltip. */
   span: string;
+  scope: StageScope;
 }
 
 const STAGE_COPY: Record<string, StageCopy> = {
   // Cascade marks (`CASCADE_STAGE_ORDER`).
-  speechEnd: { label: 'Speech ends', span: 'the anchor every later span is measured from' },
-  sttFirstPartial: { label: 'Recognizing speech', span: 'end of speech → first words back' },
-  sttFinal: { label: 'Finalizing transcript', span: 'first words → settled transcript' },
-  mtFirstToken: { label: 'Starting translation', span: 'settled transcript → first translated word' },
-  mtFinal: { label: 'Finishing translation', span: 'first translated word → translation complete' },
-  ttsFirstByte: { label: 'Generating voice', span: 'translation → first audio byte' },
-  ttsEnd: { label: 'Speaking', span: 'first audio byte → audio finished' },
+  speechEnd: {
+    label: 'Speech ends',
+    span: 'the anchor every later span is measured from',
+    scope: StageScope.Perceived,
+  },
+  sttFirstPartial: {
+    label: 'Recognizing speech',
+    span: 'end of speech → first words back',
+    scope: StageScope.Perceived,
+  },
+  sttFinal: {
+    label: 'Finalizing transcript',
+    span: 'first words → settled transcript',
+    scope: StageScope.Perceived,
+  },
+  mtFirstToken: {
+    label: 'Starting translation',
+    span: 'settled transcript → first translated word',
+    scope: StageScope.Perceived,
+  },
+  mtFinal: {
+    label: 'Finishing translation',
+    span: 'first translated word → translation complete',
+    scope: StageScope.Perceived,
+  },
+  ttsFirstByte: { label: 'Generating voice', span: 'translation → first audio byte', scope: StageScope.Perceived },
+  ttsEnd: {
+    label: 'Audio plays out',
+    span: 'first audio byte → audio finished — elapses while the listener is already hearing it',
+    scope: StageScope.AfterFirstAudio,
+  },
   // Realtime stages (`realtimeLatencyAdapter`) — one model, so no STT/MT/TTS split.
-  responseCreated: { label: 'Model responds', span: 'end of speech → model starts its turn' },
-  audioStart: { label: 'Speaking', span: 'model starts its turn → first audio out' },
+  // Both land inside the window: together they are exactly the perceived latency.
+  responseCreated: {
+    label: 'Model responds',
+    span: 'end of speech → model starts its turn',
+    scope: StageScope.Perceived,
+  },
+  audioStart: { label: 'Generating voice', span: 'model starts its turn → first audio out', scope: StageScope.Perceived },
 };
 
 /**
@@ -46,6 +89,16 @@ export function stageLabel(stage: string): string {
 /** Tooltip describing which two marks the duration spans, or `undefined` for an unknown stage. */
 export function stageSpan(stage: string): string | undefined {
   return STAGE_COPY[stage]?.span;
+}
+
+/**
+ * Whether a stage counts toward perceived latency. An unrecognized stage is
+ * treated as perceived — the same default every known stage but `ttsEnd` has, and
+ * the one that keeps a new mark visible in the breakdown rather than hidden in
+ * the after-the-fact footnote.
+ */
+export function stageScope(stage: string): StageScope {
+  return STAGE_COPY[stage]?.scope ?? StageScope.Perceived;
 }
 
 /**

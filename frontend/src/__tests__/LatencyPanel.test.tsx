@@ -52,7 +52,9 @@ describe('LatencyPanel', () => {
 
     expect(screen.getByText('1113ms')).toBeInTheDocument();
     expect(screen.getByText('✓ under 1.5s target')).toBeInTheDocument();
-    expect(screen.getByText('Speaking').parentElement).toHaveTextContent('400ms');
+    // Realtime's audioStart ends AT first audio out, so it is voice generation
+    // inside the perceived window — not the duration of the spoken audio.
+    expect(screen.getByText('Generating voice').parentElement).toHaveTextContent('400ms');
 
     expect(screen.getByText('3200ms')).toBeInTheDocument();
     expect(screen.getByText('▲ 200ms over 3.0s target')).toBeInTheDocument();

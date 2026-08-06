@@ -273,6 +273,14 @@
   white-space: nowrap;
 }
 
+/* Spans past first audio out are not latency (docs/BRIEF.md) — set below a rule,
+   dimmed, so they can't be read as part of the headline number. */
+.lab-panel__baseline-stages[data-after='true'] {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-1);
+  opacity: 0.7;
+}
+
 .lab-panel__baseline-note {
   margin: 0;
   font-size: 0.75rem;
@@ -1277,6 +1285,12 @@
   display: flex;
   justify-content: space-between;
   gap: var(--space-2);
+}
+
+/* Past first audio out, so not part of perceived latency (docs/BRIEF.md). */
+.latency-panel__stage-list li[data-after='true'],
+.latency-panel__report-stages li[data-after='true'] {
+  opacity: 0.6;
 }
 
 .latency-panel__report-list {

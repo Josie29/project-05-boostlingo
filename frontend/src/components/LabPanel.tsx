@@ -11,7 +11,7 @@ import {
   type SummaryGroup,
 } from '../api';
 import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
-import { compareStages, stageLabel, stageSpan } from '../latency/stageLabels';
+import { compareStages, stageLabel, stageScope, stageSpan, StageScope } from '../latency/stageLabels';
 import { computeWer, groundTruthLines } from '../lab/wer';
 import type { TranscriptEntry } from '../transcript/types';
 import { ExperimentReport, type ExperimentReportData } from './ExperimentReport';
@@ -112,6 +112,9 @@ function BaselineCard({
   label: string;
   group: SummaryGroup | null;
 }) {
+  const sorted = [...(group?.stages ?? [])].sort((a, b) => compareStages(a.stage, b.stage));
+  const afterFirstAudio = sorted.filter(({ stage }) => stageScope(stage) === StageScope.AfterFirstAudio);
+
   return (
     <div className="lab-panel__baseline-card" data-mode={mode}>
       <p className="lab-panel__baseline-name">{label}</p>
@@ -122,12 +125,12 @@ function BaselineCard({
           <p className="lab-panel__baseline-total">
             {group.endToEnd ? formatMs(group.endToEnd.medianMs) : '—'}
             <span className="lab-panel__baseline-caption">
-              median end-to-end · {group.utteranceCount} utterances
+              median perceived latency · speech end → first audio out · {group.utteranceCount} utterances
             </span>
           </p>
           <ul className="lab-panel__baseline-stages">
-            {[...group.stages]
-              .sort((a, b) => compareStages(a.stage, b.stage))
+            {sorted
+              .filter(({ stage }) => stageScope(stage) === StageScope.Perceived)
               .map(({ stage, stats }) => (
                 <li key={stage} title={stageSpan(stage)}>
                   <span>{stageLabel(stage)}</span>
@@ -135,9 +138,22 @@ function BaselineCard({
                 </li>
               ))}
           </ul>
-          {/* Stage medians come from separate distributions and the total also
-              carries client-side playback scheduling, so they don't add up. */}
-          <p className="lab-panel__baseline-note">Stage medians don&apos;t sum to the total.</p>
+          {/* Medians of separate distributions don't add, and cascade's total also
+              carries a client-side playback span no server mark can cover. */}
+          <p className="lab-panel__baseline-note">Stage medians don&apos;t sum exactly to the total.</p>
+          {afterFirstAudio.length > 0 && (
+            <ul className="lab-panel__baseline-stages" data-after="true">
+              {afterFirstAudio.map(({ stage, stats }) => (
+                <li key={stage} title={stageSpan(stage)}>
+                  <span>{stageLabel(stage)}</span>
+                  <span className="lab-panel__baseline-stage-value">{formatMs(stats.medianMs)}</span>
+                </li>
+              ))}
+              <li className="lab-panel__baseline-note">
+                <span>Not latency — the listener is already hearing it.</span>
+              </li>
+            </ul>
+          )}
         </>
       )}
     </div>

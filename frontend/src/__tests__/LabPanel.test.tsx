@@ -31,7 +31,10 @@ const BASELINE_SUMMARY = {
       conversationCount: 1,
       utteranceCount: 3,
       endToEnd: { count: 3, medianMs: 2457, p95Ms: 3000 },
-      stages: [{ stage: 'ttsFirstByte', stats: { count: 3, medianMs: 998, p95Ms: 1200 } }],
+      stages: [
+        { stage: 'ttsFirstByte', stats: { count: 3, medianMs: 998, p95Ms: 1200 } },
+        { stage: 'ttsEnd', stats: { count: 3, medianMs: 787, p95Ms: 900 } },
+      ],
     },
   ],
 };
@@ -86,6 +89,10 @@ describe('LabPanel', () => {
     const pane = within(screen.getByRole('region', { name: 'Baseline' }));
     expect(pane.getByText('2457ms')).toBeInTheDocument();
     expect(pane.getByText('Generating voice').parentElement).toHaveTextContent('998ms');
+    // ttsEnd elapses after first audio out, so it sits under the rule as an
+    // aside — never as a row that reads like part of the headline latency.
+    expect(pane.getByText('Not latency — the listener is already hearing it.')).toBeInTheDocument();
+    expect(pane.getByText('Audio plays out').closest('ul')).toHaveAttribute('data-after', 'true');
   });
 
   // Catches the pane collapsing to one card when only one mode is pinned: both
