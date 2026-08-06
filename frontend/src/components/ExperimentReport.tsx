@@ -1,3 +1,4 @@
+import { stageFamily } from '../latency/stageLabels';
 import type { LatencyReport } from '../latency/types';
 import type { WerResult } from '../lab/wer';
 import type { TranscriptEntry } from '../transcript/types';
@@ -18,23 +19,11 @@ export interface ExperimentReportData {
   stageFailures?: string[];
 }
 
-/**
- * Buckets a cascade stage mark into the pipeline segment it belongs to, for
- * the per-utterance stacked bar. Stage names are the latency-mark vocabulary
- * (sttFinal, mtFirstToken, ...), so the prefix is the pipeline stage.
- */
-function stageBucket(stage: string): 'stt' | 'mt' | 'tts' | 'other' {
-  if (stage.startsWith('stt') || stage === 'speechEnd') return 'stt';
-  if (stage.startsWith('mt')) return 'mt';
-  if (stage.startsWith('tts')) return 'tts';
-  return 'other';
-}
-
 /** Sum of a report's stage durations per pipeline segment. */
 function segmentMs(report: LatencyReport): { stt: number; mt: number; tts: number } {
   const totals = { stt: 0, mt: 0, tts: 0 };
   for (const { stage, ms } of report.stages) {
-    const bucket = stageBucket(stage);
+    const bucket = stageFamily(stage);
     if (bucket !== 'other') totals[bucket] += ms;
   }
   return totals;

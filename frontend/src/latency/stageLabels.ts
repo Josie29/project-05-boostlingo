@@ -20,6 +20,9 @@ export const StageScope = {
 
 export type StageScope = (typeof StageScope)[keyof typeof StageScope];
 
+/** Pipeline subsystem a stage belongs to; `other` covers derived rows and unknown marks. */
+export type StageFamily = 'stt' | 'mt' | 'tts' | 'other';
+
 interface StageCopy {
   label: string;
   /**
@@ -92,6 +95,18 @@ export function stageLabel(stage: string): string {
 /** Tooltip describing which two marks the duration spans, or `undefined` for an unknown stage. */
 export function stageSpan(stage: string): string | undefined {
   return STAGE_COPY[stage]?.span;
+}
+
+/**
+ * Which pipeline subsystem a stage belongs to — the bar's color. Realtime's
+ * stages map onto the same three: one model does the work, but the listener is
+ * still waiting on recognition, then on speech.
+ */
+export function stageFamily(stage: string): StageFamily {
+  if (stage.startsWith('stt') || stage === 'speechEnd' || stage === 'responseCreated') return 'stt';
+  if (stage.startsWith('mt')) return 'mt';
+  if (stage.startsWith('tts') || stage === 'audioStart') return 'tts';
+  return 'other';
 }
 
 /** Whether a stage counts toward perceived latency; unknown stages default to perceived, keeping a new mark visible. */

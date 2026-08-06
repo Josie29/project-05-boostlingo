@@ -86,11 +86,29 @@ describe('LabPanel', () => {
     expect(await screen.findByText('Cascade')).toBeInTheDocument();
     // Scoped to the pane: the conversations table below repeats the same median.
     const pane = within(screen.getByRole('region', { name: 'Baseline' }));
-    expect(pane.getByText('2457ms')).toBeInTheDocument();
-    expect(pane.getByText('Generating voice').parentElement).toHaveTextContent('998ms');
-    // ttsEnd is past first audio out, so it sits under the rule, not in the stack.
-    expect(pane.getByText('Not latency — the listener is already hearing it.')).toBeInTheDocument();
-    expect(pane.getByText('Audio plays out').closest('ul')).toHaveAttribute('data-after', 'true');
+    expect(pane.getByText('2.46s')).toBeInTheDocument();
+    expect(pane.getByText('Generating voice').closest('tr')).toHaveTextContent('+998ms');
+    // ttsEnd is past first audio out, so it sits below the rule, outside the stack.
+    expect(pane.getByText('Audio plays out').closest('tr')).toHaveAttribute('data-after', 'true');
+    // The gap between the stage sum and the client-measured total is a named row,
+    // not an unexplained shortfall.
+    expect(pane.getByText('Network + playback').closest('tr')).toHaveTextContent('+1459ms');
+  });
+
+  // The same number means two different things depending on the frame, and a bare
+  // column of durations cannot say which. Catches the switch not reframing values.
+  it('switches the breakdown between per-step durations and elapsed clock readings', async () => {
+    render(<LabPanel pair={{ sourceLang: 'en', targetLang: 'es' }} stageModels={{}} />);
+    await screen.findByText('Cascade');
+    const pane = within(screen.getByRole('region', { name: 'Baseline' }));
+
+    expect(pane.getByText('Step duration')).toBeInTheDocument();
+    expect(pane.getByText('Generating voice').closest('tr')).toHaveTextContent('+998ms');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Running total' }));
+
+    expect(pane.getByText('Clock at finish')).toBeInTheDocument();
+    expect(pane.getByText('Generating voice').closest('tr')).toHaveTextContent('1.00s');
   });
 
   // Catches the pane collapsing to one card when only one mode is pinned.

@@ -1,3 +1,4 @@
+import { BENCHMARK_TARGET_MS } from '../latency/targets';
 import { useState, type ReactNode } from 'react';
 import type { ArchitectureInfo, CascadeStageModels } from '../api';
 import type { LatencyReport, LatencySessionAverages } from '../latency/types';
@@ -21,16 +22,6 @@ const MODE_LABEL: Record<SessionMode, string> = {
 };
 
 const MODES: SessionMode[] = ['realtime', 'cascade'];
-
-/**
- * Perceived-latency targets from the brief, keyed by mode. The mapping lives
- * here (not in `LatencyPanel`) because this component already owns the
- * mode->label mapping above; the panel renders whatever columns it's given.
- */
-const BENCHMARK_HINT_MS: Record<SessionMode, number> = {
-  realtime: 1_500,
-  cascade: 3_000,
-};
 
 /**
  * Step-by-step guidance shown alongside the plain error message for the two
@@ -188,7 +179,7 @@ export function SessionPanel({
           modes={MODES.map((candidate) => ({
             mode: candidate,
             label: MODE_LABEL[candidate],
-            targetMs: BENCHMARK_HINT_MS[candidate],
+            targetMs: BENCHMARK_TARGET_MS[candidate],
             averages: latencyAveragesByMode[candidate],
           }))}
           recentReports={latencyReports}

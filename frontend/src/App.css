@@ -208,17 +208,61 @@
   }
 }
 
-.lab-panel__baseline-card {
+.lab-panel__frame {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.lab-panel__seg {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  overflow: hidden;
+}
+
+.lab-panel__seg button {
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: var(--space-1) var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.lab-panel__seg button[aria-pressed='true'] {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.lab-panel__frame-hint {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.baseline-card {
   border: 1px solid var(--color-border);
   border-radius: 0.375rem;
   padding: var(--space-2) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  min-height: 9rem;
+  gap: var(--space-2);
+  min-height: 11rem;
 }
 
-.lab-panel__baseline-name {
+.baseline-card[data-empty='true'] {
+  border-style: dashed;
+}
+
+/* Centers the prompt in the space the breakdown would fill, without pulling the
+   mode name off the top edge where the filled card keeps it. */
+.baseline-card[data-empty='true'] .lab-panel__empty {
+  margin: auto 0;
+}
+
+.baseline-card__name {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   text-transform: uppercase;
@@ -226,64 +270,162 @@
   color: var(--color-text-muted);
 }
 
-.lab-panel__baseline-card[data-mode='realtime'] .lab-panel__baseline-name {
+.baseline-card[data-mode='realtime'] .baseline-card__name {
   color: var(--color-mode-realtime);
 }
 
-.lab-panel__baseline-card[data-mode='cascade'] .lab-panel__baseline-name {
+.baseline-card[data-mode='cascade'] .baseline-card__name {
   color: var(--color-mode-cascade);
 }
 
-.lab-panel__baseline-total {
-  font-size: 1.125rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+.baseline-card__total {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: var(--space-2);
+  font-size: 1.375rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
-.lab-panel__baseline-caption {
+.baseline-card__caption,
+.baseline-card__verdict {
   font-size: 0.75rem;
   font-weight: 400;
   color: var(--color-text-muted);
 }
 
-.lab-panel__baseline-stages {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  font-size: 0.8125rem;
-  /* Prose labels, so body font — only the durations stay tabular. */
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-muted);
-}
-
-.lab-panel__baseline-stages li {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.lab-panel__baseline-stage-value {
+.baseline-card__verdict {
+  font-family: var(--font-mono);
+  padding: 0.0625rem var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: 999px;
   white-space: nowrap;
 }
 
-/* Past first audio out, so not latency — set below a rule so it can't read as
-   part of the headline. */
-.lab-panel__baseline-stages[data-after='true'] {
-  border-top: 1px solid var(--color-border);
-  padding-top: var(--space-1);
-  opacity: 0.7;
+.baseline-card__verdict[data-over='true'] {
+  color: var(--color-danger);
 }
 
-.lab-panel__baseline-note {
-  margin: 0;
-  font-size: 0.75rem;
+.baseline-card__verdict[data-over='false'] {
+  color: var(--color-success);
+}
+
+.baseline-card__breakdown {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.baseline-card__breakdown th {
+  font-weight: 400;
+  font-size: 0.6875rem;
+  text-align: left;
   color: var(--color-text-muted);
+  padding-bottom: var(--space-1);
+}
+
+.baseline-card__breakdown td {
+  padding: 0.125rem 0;
+  vertical-align: middle;
+}
+
+/* Outspecifies the shared `td` padding rule above, which would zero this out. */
+.baseline-card__breakdown td.baseline-card__label {
+  white-space: nowrap;
+  padding-right: var(--space-4);
+}
+
+.baseline-card__track-cell {
+  width: 100%;
+}
+
+.baseline-card__value {
+  text-align: right;
+  padding-left: var(--space-3);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+/* Past first audio out, so not part of the total - hatched and dimmed so it
+   can't be read as one of the rows that add up. */
+.baseline-card__breakdown tr[data-after] td {
+  opacity: 0.65;
+  border-top: 1px solid var(--color-border);
+}
+
+.baseline-card__track {
+  position: relative;
+  display: block;
+  height: 0.75rem;
+}
+
+.baseline-card__bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 2px;
+  transition: left 240ms ease, width 240ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .baseline-card__bar {
+    transition: none;
+  }
+}
+
+.baseline-card__bar[data-family='stt'] {
+  background: #35a0c6;
+}
+
+.baseline-card__bar[data-family='mt'] {
+  background: var(--color-mode-cascade);
+}
+
+.baseline-card__bar[data-family='tts'] {
+  background: #8f6fd9;
+}
+
+.baseline-card__bar[data-family='other'] {
+  background: var(--color-text-muted);
+}
+
+.baseline-card__bar[data-ghost] {
+  background: repeating-linear-gradient(135deg, #8f6fd9 0 3px, transparent 3px 7px);
+  border: 1px solid #6f56ab;
+}
+
+.baseline-card__axis {
+  position: relative;
+  display: block;
+  height: 1rem;
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--color-border);
+}
+
+.baseline-card__tick,
+.baseline-card__target {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--color-border);
+}
+
+.baseline-card__target {
+  border-left: 1px dashed var(--color-text-muted);
+}
+
+.baseline-card__tick span,
+.baseline-card__target span {
+  position: absolute;
+  top: 0;
+  left: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .lab-panel__pin {

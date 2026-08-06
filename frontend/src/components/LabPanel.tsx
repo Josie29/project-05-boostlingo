@@ -11,7 +11,7 @@ import {
   type SummaryGroup,
 } from '../api';
 import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
-import { compareStages, stageLabel, stageScope, stageSpan, StageScope } from '../latency/stageLabels';
+import { BaselineCard, LatencyFrame } from './BaselineCard';
 import { computeWer, groundTruthLines } from '../lab/wer';
 import type { TranscriptEntry } from '../transcript/types';
 import { ExperimentReport, type ExperimentReportData } from './ExperimentReport';
@@ -100,64 +100,6 @@ const BASELINE_MODES = [
   { mode: 'cascade', label: 'Cascade' },
 ] as const;
 
-/** One mode's pinned reference numbers, or the prompt to pin one. */
-function BaselineCard({
-  mode,
-  label,
-  group,
-}: {
-  mode: (typeof BASELINE_MODES)[number]['mode'];
-  label: string;
-  group: SummaryGroup | null;
-}) {
-  const sorted = [...(group?.stages ?? [])].sort((a, b) => compareStages(a.stage, b.stage));
-  const afterFirstAudio = sorted.filter(({ stage }) => stageScope(stage) === StageScope.AfterFirstAudio);
-
-  return (
-    <div className="lab-panel__baseline-card" data-mode={mode}>
-      <p className="lab-panel__baseline-name">{label}</p>
-      {group === null ? (
-        <p className="lab-panel__empty">Nothing pinned. Pin a {label.toLowerCase()} run below to populate this.</p>
-      ) : (
-        <>
-          <p className="lab-panel__baseline-total">
-            {group.endToEnd ? formatMs(group.endToEnd.medianMs) : '—'}
-            <span className="lab-panel__baseline-caption">
-              median perceived latency · speech end → first audio out · {group.utteranceCount} utterances
-            </span>
-          </p>
-          <ul className="lab-panel__baseline-stages">
-            {sorted
-              .filter(({ stage }) => stageScope(stage) === StageScope.Perceived)
-              .map(({ stage, stats }) => (
-                <li key={stage} title={stageSpan(stage)}>
-                  <span>{stageLabel(stage)}</span>
-                  <span className="lab-panel__baseline-stage-value">{formatMs(stats.medianMs)}</span>
-                </li>
-              ))}
-          </ul>
-          {/* Medians of separate distributions don't add, and the total is
-              client-measured while the stages are server-measured. */}
-          <p className="lab-panel__baseline-note">Stage medians don&apos;t sum exactly to the total.</p>
-          {afterFirstAudio.length > 0 && (
-            <ul className="lab-panel__baseline-stages" data-after="true">
-              {afterFirstAudio.map(({ stage, stats }) => (
-                <li key={stage} title={stageSpan(stage)}>
-                  <span>{stageLabel(stage)}</span>
-                  <span className="lab-panel__baseline-stage-value">{formatMs(stats.medianMs)}</span>
-                </li>
-              ))}
-              <li className="lab-panel__baseline-note">
-                <span>Not latency — the listener is already hearing it.</span>
-              </li>
-            </ul>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
 /**
  * The Lab view (P1+P2): a baseline pane showing the pinned reference numbers per
  * mode, and the experiments table — one row per stored conversation with its
@@ -167,6 +109,7 @@ function BaselineCard({
 export function LabPanel({ pair, stageModels }: LabPanelProps) {
   const [conversations, setConversations] = useState<ConversationListing[] | null>(null);
   const [baselineGroups, setBaselineGroups] = useState<SummaryGroup[] | null>(null);
+  const [frame, setFrame] = useState<LatencyFrame>(LatencyFrame.Step);
   const [error, setError] = useState<string | null>(null);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -277,6 +220,28 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
             </button>
           )}
         </div>
+        <div className="lab-panel__frame">
+          <div className="lab-panel__seg" role="group" aria-label="Reading frame">
+            {[
+              { value: LatencyFrame.Step, label: 'Each step' },
+              { value: LatencyFrame.Total, label: 'Running total' },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={frame === option.value}
+                onClick={() => setFrame(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <span className="lab-panel__frame-hint">
+            {frame === LatencyFrame.Step
+              ? 'How long that step took on its own.'
+              : 'Where the clock stood when that step finished.'}
+          </span>
+        </div>
         <div className="lab-panel__baselines">
           {BASELINE_MODES.map(({ mode, label }) => (
             <BaselineCard
@@ -284,6 +249,7 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
               mode={mode}
               label={label}
               group={baselineGroups?.find((candidate) => candidate.mode === mode) ?? null}
+              frame={frame}
             />
           ))}
         </div>
