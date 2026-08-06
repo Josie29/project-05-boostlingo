@@ -66,6 +66,7 @@ function fakeDeps(session: InterpreterSession, reported: ConversationMetricsPayl
       dispose: vi.fn(async () => {}),
     }),
     createSession: () => session,
+    createLiveSession: () => session,
     report: async (payload) => {
       reported.push(payload);
     },
@@ -76,7 +77,7 @@ function fakeDeps(session: InterpreterSession, reported: ConversationMetricsPayl
 }
 
 const CONFIG = {
-  file: {} as Blob,
+  source: { kind: 'file' as const, file: {} as Blob },
   fixtureName: 'benchmark-en-es.wav',
   groundTruth: 'all tests pass',
   pair: { sourceLang: 'en', targetLang: 'es' },
@@ -170,5 +171,58 @@ describe('runCascadeExperiment stage failures', () => {
     const result = await runCascadeExperiment(CONFIG, undefined, fakeDeps(session, []));
 
     expect(result.stageFailures).toEqual(['Text-to-speech failed for one utterance.']);
+  });
+});
+
+describe('runCascadeExperiment from the microphone', () => {
+  // A mic run has no known duration, so nothing but the operator can end it.
+  // Catches the runner resolving on its own (scoring a half-read set) or never
+  // resolving (leaving the session open with the mic hot).
+  it('runs until the stop signal resolves, then scores what was captured', async () => {
+    const session = fakeSession({
+      transcript: [{ utteranceId: 'cascade:a', lane: 'source', text: 'all tests pass', final: true }],
+    });
+    const reported: ConversationMetricsPayload[] = [];
+    let stop: () => void = () => {};
+    const stopSignal = new Promise<void>((resolve) => {
+      stop = resolve;
+    });
+
+    const run = runCascadeExperiment(
+      { ...CONFIG, source: { kind: 'mic', stopSignal }, fixtureName: 'microphone' },
+      undefined,
+      fakeDeps(session, reported),
+    );
+
+    let settled = false;
+    void run.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(session.stopCalls).toBe(0);
+
+    stop();
+    const result = await run;
+
+    expect(result.wer.wer).toBe(0);
+    expect(session.stopCalls).toBe(1);
+    expect(reported[0].fixture).toBe('microphone');
+  });
+
+  // The mic session must come from the live factory, not the fixture one - a mic
+  // run built on a fixture stream would capture silence.
+  it('opens a session on the real microphone, not a fixture stream', async () => {
+    const session = fakeSession({});
+    const deps = fakeDeps(session, []);
+    const createFixtureStream = vi.fn(deps.createFixtureStream);
+
+    await runCascadeExperiment(
+      { ...CONFIG, source: { kind: 'mic', stopSignal: Promise.resolve() } },
+      undefined,
+      { ...deps, createFixtureStream },
+    );
+
+    expect(createFixtureStream).not.toHaveBeenCalled();
   });
 });

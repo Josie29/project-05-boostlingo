@@ -10,7 +10,12 @@ import {
   type LanguagePair,
   type SummaryGroup,
 } from '../api';
-import { runCascadeExperiment, type ExperimentPhase, type ExperimentResult } from '../lab/experimentRunner';
+import {
+  runCascadeExperiment,
+  type ExperimentPhase,
+  type ExperimentResult,
+  type ExperimentSource,
+} from '../lab/experimentRunner';
 import { BaselineCard, LatencyFrame } from './BaselineCard';
 import { computeWer, groundTruthLines } from '../lab/wer';
 import type { TranscriptEntry } from '../transcript/types';
@@ -69,9 +74,12 @@ export interface LabPanelProps {
 const PHASE_LABEL: Record<ExperimentPhase, string> = {
   decoding: 'Decoding audio…',
   running: 'Replaying at 1× — the file is the mic…',
-  draining: 'File finished; letting the pipeline settle…',
+  draining: 'Audio finished; letting the pipeline settle…',
   scoring: 'Scoring WER…',
 };
+
+/** The one phase whose wording depends on where the audio comes from. */
+const MIC_RUNNING_LABEL = 'Listening — read the lines aloud, then press Stop.';
 
 function formatMs(ms: number | null): string {
   // == null also catches undefined from a backend predating these fields.
@@ -123,6 +131,9 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
   const [liveUtteranceCount, setLiveUtteranceCount] = useState(0);
   const [runDurationMs, setRunDurationMs] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [source, setSource] = useState<'file' | 'mic'>('file');
+  /** Resolves the running mic session's stop signal; null unless a mic run is live. */
+  const stopMicRef = useRef<(() => void) | null>(null);
 
   // Ticks the progress bar along the file's own timeline while replaying —
   // the replay is 1× by construction, so wall clock IS file position.
@@ -180,7 +191,8 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
 
   function handleRun(): void {
     const file = fileRef.current?.files?.[0];
-    if (!file || utterances.length === 0 || runPhase !== null) return;
+    if (utterances.length === 0 || runPhase !== null) return;
+    if (source === 'file' && !file) return;
 
     setRunResult(null);
     setRunError(null);
@@ -188,8 +200,25 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
     setLiveUtteranceCount(0);
     setRunDurationMs(null);
     setElapsedMs(0);
+
+    let experimentSource: ExperimentSource;
+    if (source === 'file' && file) {
+      experimentSource = { kind: 'file', file };
+    } else {
+      const stopSignal = new Promise<void>((resolve) => {
+        stopMicRef.current = resolve;
+      });
+      experimentSource = { kind: 'mic', stopSignal };
+    }
+
     runCascadeExperiment(
-      { file, fixtureName: file.name, groundTruth: utterances.join('\n'), pair, models: stageModels },
+      {
+        source: experimentSource,
+        fixtureName: source === 'file' && file ? file.name : 'microphone',
+        groundTruth: utterances.join('\n'),
+        pair,
+        models: stageModels,
+      },
       {
         onPhase: setRunPhase,
         onStarted: setRunDurationMs,
@@ -204,7 +233,16 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
         refresh();
       })
       .catch((cause: unknown) => setRunError(cause instanceof Error ? cause.message : 'The experiment failed.'))
-      .finally(() => setRunPhase(null));
+      .finally(() => {
+        setRunPhase(null);
+        stopMicRef.current = null;
+      });
+  }
+
+  /** Ends a mic run; the runner still drains and scores what was captured. */
+  function handleStopMic(): void {
+    stopMicRef.current?.();
+    stopMicRef.current = null;
   }
 
   const hasBaseline = baselineGroups !== null && baselineGroups.length > 0;
@@ -260,26 +298,69 @@ export function LabPanel({ pair, stageModels }: LabPanelProps) {
           <h3>Run an experiment</h3>
         </div>
         <p className="lab-panel__empty">
-          Cascade only for now. Replays an audio file through a cascade session (models from the Live card) and
-          scores the recognized transcript against your ground truth — WER measures the speech-to-text output
-          only, not translation quality. Keep this tab open; you&apos;ll hear the TTS output as it runs.
+          Cascade only for now. Runs a cascade session (models from the Live card) against an audio file or your
+          microphone, and scores the recognized transcript against your ground truth — WER measures the
+          speech-to-text output only, not translation quality. Keep this tab open; you&apos;ll hear the TTS output
+          as it runs.
         </p>
         <div className="lab-panel__run-form">
-          <input ref={fileRef} type="file" accept="audio/*,video/*" aria-label="Fixture audio file" />
+          <div className="lab-panel__seg" role="group" aria-label="Audio source">
+            {[
+              { value: 'file' as const, label: 'Audio file' },
+              { value: 'mic' as const, label: 'Microphone' },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={source === option.value}
+                disabled={runPhase !== null}
+                onClick={() => setSource(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+
+          {source === 'file' ? (
+            <input ref={fileRef} type="file" accept="audio/*,video/*" aria-label="Fixture audio file" />
+          ) : (
+            <p className="lab-panel__empty">
+              Read the lines below aloud in order, pausing about two seconds between them — the pause is what
+              lets the VAD split them into separate utterances. Press Stop when you reach the end.
+            </p>
+          )}
 
           <GroundTruthField value={groundTruth} onChange={setGroundTruth} />
 
-          <button
-            type="button"
-            className="lab-panel__refresh"
-            onClick={handleRun}
-            disabled={runPhase !== null || utterances.length === 0}
-          >
-            {runPhase === null ? 'Run experiment' : 'Running…'}
-          </button>
-          {runPhase !== null && <p className="lab-panel__empty">{PHASE_LABEL[runPhase]}</p>}
+          {runPhase !== null && source === 'mic' ? (
+            <button type="button" className="lab-panel__refresh" onClick={handleStopMic} disabled={runPhase !== 'running'}>
+              {runPhase === 'running' ? 'Stop and score' : 'Scoring…'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="lab-panel__refresh"
+              onClick={handleRun}
+              disabled={runPhase !== null || utterances.length === 0}
+            >
+              {runPhase !== null ? 'Running…' : source === 'mic' ? 'Start recording' : 'Run experiment'}
+            </button>
+          )}
+          {runPhase !== null && (
+            <p className="lab-panel__empty">
+              {source === 'mic' && runPhase === 'running' ? MIC_RUNNING_LABEL : PHASE_LABEL[runPhase]}
+            </p>
+          )}
           {runError !== null && <p className="lab-panel__error">{runError}</p>}
         </div>
+        {runPhase !== null && runDurationMs === null && (
+          <div className="lab-panel__live">
+            <p className="lab-panel__live-status num">
+              {Math.round(elapsedMs / 1000)}s · {liveUtteranceCount} utterances
+            </p>
+            {liveEntries.length > 0 && <TranscriptPanel entries={liveEntries} />}
+          </div>
+        )}
         {runPhase !== null && runDurationMs !== null && (
           <div className="lab-panel__live">
             <div

@@ -14,9 +14,16 @@ import { INITIAL_TRANSCRIPT_STATE, type TranscriptEntry, type TranscriptState } 
 import { createFixtureMicStream, type FixtureMicStream } from './audioFixture';
 import { computeWer, type WerResult } from './wer';
 
+/**
+ * Where the run's audio comes from. A file replays at 1x and ends itself; the
+ * microphone is a real session that runs until the operator stops it — same
+ * pipeline, same scoring, so a live read-aloud is comparable to a replay.
+ */
+export type ExperimentSource = { kind: 'file'; file: Blob } | { kind: 'mic'; stopSignal: Promise<void> };
+
 export interface ExperimentConfig {
-  file: Blob;
-  /** Label stored with the run, e.g. the file name. */
+  source: ExperimentSource;
+  /** Label stored with the run — the file name, or how the mic run was captured. */
   fixtureName: string;
   /** Reference transcript of the fixture's source-language speech. */
   groundTruth: string;
@@ -53,7 +60,7 @@ export interface ExperimentSnapshot {
 /** Optional run-progress hooks — the live view during a replay. All fire on the runner's own event flow; none affect the run. */
 export interface ExperimentObservers {
   onPhase?: (phase: ExperimentPhase) => void;
-  /** Fires once, after decode, with the fixture's duration — the progress bar's denominator. */
+  /** Fires once with the fixture's duration, the progress bar's denominator — never for a mic run, which has no known length. */
   onStarted?: (durationMs: number) => void;
   /** Fires on every transcript/latency event with the accumulated evidence so far. */
   onUpdate?: (snapshot: ExperimentSnapshot) => void;
@@ -63,6 +70,8 @@ export interface ExperimentObservers {
 export interface ExperimentRunnerDeps {
   createFixtureStream: (file: Blob) => Promise<FixtureMicStream>;
   createSession: (fixtureMic: MediaStream) => InterpreterSession;
+  /** A session on the real microphone, for a mic-sourced run. */
+  createLiveSession: () => InterpreterSession;
   report: (payload: ConversationMetricsPayload) => Promise<void>;
   delay: (ms: number) => Promise<void>;
   now: () => number;
@@ -76,6 +85,7 @@ function defaultDeps(): ExperimentRunnerDeps {
     // downsample, VAD, barge-in) runs exactly as a live session.
     createSession: (fixtureMic) =>
       new CascadeInterpreterSession(new CascadeSessionController({ getUserMedia: async () => fixtureMic })),
+    createLiveSession: () => new CascadeInterpreterSession(new CascadeSessionController()),
     report: reportConversationMetrics,
     delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now(),
@@ -104,11 +114,14 @@ export async function runCascadeExperiment(
   deps: ExperimentRunnerDeps = defaultDeps(),
 ): Promise<ExperimentResult> {
   const onPhase = observers?.onPhase;
-  onPhase?.('decoding');
-  const fixture = await deps.createFixtureStream(config.file);
-  observers?.onStarted?.(fixture.durationMs);
+  let fixture: FixtureMicStream | null = null;
+  if (config.source.kind === 'file') {
+    onPhase?.('decoding');
+    fixture = await deps.createFixtureStream(config.source.file);
+    observers?.onStarted?.(fixture.durationMs);
+  }
 
-  const session = deps.createSession(fixture.stream);
+  const session = fixture === null ? deps.createLiveSession() : deps.createSession(fixture.stream);
   let transcript: TranscriptState = INITIAL_TRANSCRIPT_STATE;
   let latency: LatencyState = INITIAL_LATENCY_STATE;
   const stageFailures: string[] = [];
@@ -138,7 +151,9 @@ export async function runCascadeExperiment(
       throw new Error(stateAfterStart.errorMessage ?? 'The experiment session failed to start.');
     }
 
-    await fixture.ended;
+    // A file ends itself at its own duration; a mic run ends when the operator
+    // says so. Either way the pipeline gets DRAIN_MS to settle the tail.
+    await (fixture === null ? (config.source as { stopSignal: Promise<void> }).stopSignal : fixture.ended);
     onPhase?.('draining');
     await deps.delay(DRAIN_MS);
 
@@ -151,7 +166,7 @@ export async function runCascadeExperiment(
   } finally {
     session.stop();
     for (const unsubscribe of unsubscribes) unsubscribe?.();
-    await fixture.dispose();
+    await fixture?.dispose();
   }
 
   onPhase?.('scoring');
