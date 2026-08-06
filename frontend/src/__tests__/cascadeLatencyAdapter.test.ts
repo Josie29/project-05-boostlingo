@@ -42,6 +42,29 @@ describe('CascadeLatencyTracker', () => {
     expect(report?.stages.some((s) => Number.isNaN(s.ms))).toBe(false);
   });
 
+  // The pipeline overlaps: TtsCascadeObserver synthesizes each sentence as the
+  // translation streams, so a multi-sentence utterance can produce ttsFirstByte
+  // before mtFinal. Diffing in canonical stage order would report that as a
+  // negative "Generating voice" and a mtFinal span that runs backwards; catches
+  // any return to canonical-order diffing.
+  it('reports non-negative intervals when marks arrive out of canonical stage order', () => {
+    const tracker = new CascadeLatencyTracker();
+    tracker.handleEnvelope(mark('utt_1', 'speechEnd', 1_000));
+    tracker.handleEnvelope(mark('utt_1', 'mtFirstToken', 1_500));
+    tracker.handleEnvelope(mark('utt_1', 'ttsFirstByte', 1_800));
+    // Translation finishes only after synthesis of the first sentence began.
+    const report = tracker.handleEnvelope(mark('utt_1', 'mtFinal', 2_000));
+
+    expect(report?.stages).toEqual([
+      { stage: 'mtFirstToken', ms: 500 },
+      { stage: 'ttsFirstByte', ms: 300 },
+      { stage: 'mtFinal', ms: 200 },
+    ]);
+    expect(report?.stages.every((stage) => stage.ms >= 0)).toBe(true);
+    // The headline is unaffected: it is always ttsFirstByte - speechEnd.
+    expect(tracker.handleFirstChunkTiming({ utteranceId: 'utt_1', clientReceiveToAudibleMs: 20 }).endToEndMs).toBe(820);
+  });
+
   // Catches a crash/corruption bug: the very first mark an utterance ever
   // receives (whichever stage it happens to be) has nothing earlier to diff
   // against and must be omitted from `stages` entirely — never a `NaN` or a

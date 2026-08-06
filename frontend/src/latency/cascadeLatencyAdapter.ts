@@ -72,13 +72,14 @@ function readLatencyMark(rawEvent: unknown): { utteranceId: string; stage: Casca
  * Reduces one utterance's accumulated marks/timing into a {@link LatencyReport}.
  *
  * Per-stage `ms` is the delta between one stage's `serverTimeMs` and the
- * nearest *earlier* stage (in {@link CASCADE_STAGE_ORDER}) this utterance
- * already has a mark for — a server-clock-only subtraction, never a
- * client-minus-server one. A stage with no earlier mark to diff against
- * (including the very first mark this utterance has, whichever stage that
- * happens to be) is simply omitted from `stages` rather than reported as a
- * zero or `NaN` placeholder, so a dropped/late mark degrades the breakdown
- * gracefully instead of corrupting it.
+ * chronologically preceding mark this utterance has — a server-clock-only
+ * subtraction, never a client-minus-server one. A stage with no earlier mark to
+ * diff against (including the very first mark this utterance has, whichever
+ * stage that happens to be) is simply omitted from `stages` rather than
+ * reported as a zero or `NaN` placeholder, so a dropped/late mark degrades the
+ * breakdown gracefully instead of corrupting it. A stage's `ms` is therefore
+ * "the interval that ended at this mark", whichever mark opened it — not
+ * necessarily the canonical predecessor, which may be missing or later.
  *
  * `endToEndMs` is `ttsFirstByte - speechEnd` (both server clock — the
  * server-relative span issue #10 specifies) plus the local
@@ -91,9 +92,18 @@ function buildReport(utteranceId: string, state: UtteranceLatencyState): Latency
   const stages: LatencyStageTiming[] = [];
   let previousMarkMs: number | null = null;
 
-  for (const stage of CASCADE_STAGE_ORDER) {
-    const markMs = state.marks[stage];
-    if (markMs === undefined) continue;
+  // Chronological, not `CASCADE_STAGE_ORDER`: the pipeline overlaps. TTS
+  // synthesizes each sentence as translation streams (`TtsCascadeObserver`
+  // calls `SynthesizePhraseAsync` from the chunker on non-final chunks), so a
+  // multi-sentence utterance can produce ttsFirstByte before mtFinal. Diffing
+  // in canonical order would then report a negative duration; diffing in
+  // timestamp order always yields a real, non-negative interval ending at that
+  // mark. Ties break on canonical order so same-millisecond marks stay readable.
+  const marked = CASCADE_STAGE_ORDER.map((stage, index) => ({ stage, index, markMs: state.marks[stage] }))
+    .filter((entry): entry is { stage: CascadeStage; index: number; markMs: number } => entry.markMs !== undefined)
+    .sort((a, b) => a.markMs - b.markMs || a.index - b.index);
+
+  for (const { stage, markMs } of marked) {
     if (previousMarkMs !== null) {
       stages.push({ stage, ms: markMs - previousMarkMs });
     }

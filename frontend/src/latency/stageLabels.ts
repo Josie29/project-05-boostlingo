@@ -26,7 +26,15 @@ export type StageScope = (typeof StageScope)[keyof typeof StageScope];
 
 interface StageCopy {
   label: string;
-  /** Which two marks the duration spans — surfaced as the row's tooltip. */
+  /**
+   * What the mark ending this interval means — surfaced as the row's tooltip.
+   * Deliberately names only the *end* of the span: a stage's duration is measured
+   * from whichever mark chronologically preceded it, and marks go missing (a
+   * short utterance with no STT partial, a provider that emits no first-token
+   * event), so naming a fixed predecessor would state something untrue on those
+   * utterances. Stored data shows this is routine, not theoretical — sttFinal has
+   * more samples than sttFirstPartial.
+   */
   span: string;
   scope: StageScope;
 }
@@ -35,43 +43,51 @@ const STAGE_COPY: Record<string, StageCopy> = {
   // Cascade marks (`CASCADE_STAGE_ORDER`).
   speechEnd: {
     label: 'Speech ends',
-    span: 'the anchor every later span is measured from',
+    span: 'the VAD committed the turn — the anchor every later span is measured from',
     scope: StageScope.Perceived,
   },
   sttFirstPartial: {
     label: 'Recognizing speech',
-    span: 'end of speech → first words back',
+    span: 'ends when the first words come back from speech-to-text',
     scope: StageScope.Perceived,
   },
   sttFinal: {
     label: 'Finalizing transcript',
-    span: 'first words → settled transcript',
+    span: 'ends when the transcript settles',
     scope: StageScope.Perceived,
   },
   mtFirstToken: {
     label: 'Starting translation',
-    span: 'settled transcript → first translated word',
+    span: 'ends at the first translated word',
     scope: StageScope.Perceived,
   },
   mtFinal: {
     label: 'Finishing translation',
-    span: 'first translated word → translation complete',
+    span: 'ends when translation completes — voice synthesis may already be running',
     scope: StageScope.Perceived,
   },
-  ttsFirstByte: { label: 'Generating voice', span: 'translation → first audio byte', scope: StageScope.Perceived },
+  ttsFirstByte: {
+    label: 'Generating voice',
+    span: 'ends at the first synthesized audio byte — the perceived-latency finish line',
+    scope: StageScope.Perceived,
+  },
   ttsEnd: {
     label: 'Audio plays out',
-    span: 'first audio byte → audio finished — elapses while the listener is already hearing it',
+    span: 'ends when the audio finishes — elapses while the listener is already hearing it',
     scope: StageScope.AfterFirstAudio,
   },
   // Realtime stages (`realtimeLatencyAdapter`) — one model, so no STT/MT/TTS split.
   // Both land inside the window: together they are exactly the perceived latency.
   responseCreated: {
     label: 'Model responds',
-    span: 'end of speech → model starts its turn',
+    span: 'ends when the model starts its turn',
     scope: StageScope.Perceived,
   },
-  audioStart: { label: 'Generating voice', span: 'model starts its turn → first audio out', scope: StageScope.Perceived },
+  audioStart: {
+    label: 'Generating voice',
+    span: 'ends when the first audio arrives — the perceived-latency finish line',
+    scope: StageScope.Perceived,
+  },
 };
 
 /**
